@@ -47,8 +47,9 @@ def _saved_options(settings: dict) -> Options:
 class App:
     def __init__(self, initial_files: list[str] | None = None) -> None:
         self.root = TkinterDnD.Tk() if _HAS_DND else tk.Tk()
-        self.root.geometry("880x660")
-        self.root.minsize(760, 560)
+        # The real size is worked out from the built layout in _fit_window();
+        # see there for why it is not a fixed number.
+        self.root.minsize(820, 600)
 
         self.files: list[str] = []
         self.analyses: dict[str, unlock.Analysis] = {}
@@ -72,6 +73,7 @@ class App:
 
         self._build()
         self._apply_texts()
+        self._fit_window(initial=True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         if initial_files:
             self.root.after(100, lambda: self.add_paths(initial_files))
@@ -84,7 +86,8 @@ class App:
     def _build(self) -> None:
         root = self.root
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
+        root.rowconfigure(2, weight=0)  # analysis and options keep their size
+        root.rowconfigure(3, weight=1)  # the log takes the slack instead
 
         # ---- header
         head = ttk.Frame(root, padding=(12, 10, 12, 4))
@@ -106,7 +109,7 @@ class App:
         self.lbl_drop = ttk.Label(files, anchor="center", relief="groove", padding=6, foreground="#555")
         self._reg(self.lbl_drop, "drop_hint")
         self.lbl_drop.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        self.lst_files = tk.Listbox(files, height=5, activestyle="none")
+        self.lst_files = tk.Listbox(files, height=4, activestyle="none")
         self.lst_files.grid(row=1, column=0, sticky="nsew")
         btns = ttk.Frame(files)
         btns.grid(row=1, column=1, sticky="ns", padx=(8, 0))
@@ -125,7 +128,6 @@ class App:
         mid = ttk.Frame(root)
         mid.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
         mid.columnconfigure(0, weight=1)
-        mid.rowconfigure(1, weight=1)
 
         analysis = self._reg(ttk.LabelFrame(mid, padding=8), "lbl_analysis")
         analysis.grid(row=0, column=0, sticky="ew")
@@ -136,7 +138,7 @@ class App:
         self.lbl_extra.grid(row=1, column=0, sticky="ew", pady=(2, 0))
 
         opts = self._reg(ttk.LabelFrame(mid, padding=8), "lbl_options")
-        opts.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        opts.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         self._reg(ttk.Checkbutton(opts, variable=self.var_font), "opt_font").pack(anchor="w")
         self._reg(ttk.Checkbutton(opts, variable=self.var_size), "opt_size").pack(anchor="w")
         self._reg(ttk.Checkbutton(opts, variable=self.var_line), "opt_line").pack(anchor="w")
@@ -148,10 +150,11 @@ class App:
 
         # ---- log
         logf = self._reg(ttk.LabelFrame(root, padding=4), "lbl_log")
-        logf.grid(row=3, column=0, sticky="ew", padx=12, pady=4)
+        logf.grid(row=3, column=0, sticky="nsew", padx=12, pady=4)
         logf.columnconfigure(0, weight=1)
-        self.txt_log = tk.Text(logf, height=6, state="disabled", wrap="none")
-        self.txt_log.grid(row=0, column=0, sticky="ew")
+        logf.rowconfigure(0, weight=1)
+        self.txt_log = tk.Text(logf, height=5, state="disabled", wrap="none")
+        self.txt_log.grid(row=0, column=0, sticky="nsew")
         sb = ttk.Scrollbar(logf, command=self.txt_log.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.txt_log.configure(yscrollcommand=sb.set)
@@ -173,6 +176,27 @@ class App:
 
         self._set_status("status_ready")
 
+    def _fit_window(self, initial: bool = False) -> None:
+        """Keep the window at least as big as the layout needs.
+
+        Tk's grid does not shrink a row below what it asked for; it lets the
+        content run off the bottom edge instead. A window one pixel too short
+        therefore hides the Run button rather than tightening up, so the
+        minimum size is taken from the built layout instead of guessed. The cap
+        is for short screens, where something has to give.
+        """
+        self.root.update_idletasks()
+        need_w = max(820, self.root.winfo_reqwidth())
+        need_h = min(self.root.winfo_reqheight(), int(self.root.winfo_screenheight() * 0.92))
+        self.root.minsize(need_w, need_h)
+        if initial:
+            self.root.geometry(f"{need_w}x{need_h}")
+            return
+        grow_w = max(need_w, self.root.winfo_width())
+        grow_h = max(need_h, self.root.winfo_height())
+        if (grow_w, grow_h) != (self.root.winfo_width(), self.root.winfo_height()):
+            self.root.geometry(f"{grow_w}x{grow_h}")
+
     def _apply_texts(self) -> None:
         self.root.title(t("app_title"))
         for widget, key, attr in self._texts:
@@ -185,6 +209,19 @@ class App:
             self._set_status(self._status_key, **self._status_kwargs)
 
     # ------------------------------------------------------------ helpers
+    def _post(self, fn, *args, **kwargs) -> None:
+        """Hand a piece of work back to the UI thread.
+
+        Tk only accepts after() from another thread while the main loop is
+        running; once the window is on its way out it raises instead. A worker
+        finishing its last book must not die on that, so the call is guarded
+        and the result simply goes nowhere.
+        """
+        try:
+            self.root.after(0, lambda: fn(*args, **kwargs))
+        except (RuntimeError, tk.TclError):  # pragma: no cover - teardown only
+            pass
+
     def _set_status(self, key: str, **kwargs) -> None:
         self._status_key, self._status_kwargs = key, kwargs
         self.lbl_status.configure(text=t(key, **kwargs))
@@ -210,6 +247,7 @@ class App:
         if index >= 0:
             i18n.set_lang(i18n.LANGS[index])
         self._apply_texts()
+        self._fit_window()  # a longer translation must not push Run off the edge
 
     def _totals(self) -> unlock.Counts:
         total = unlock.Counts()
@@ -281,16 +319,16 @@ class App:
                 try:
                     analysis = unlock.analyze_epub(path)
                 except unlock.DrmProtected:
-                    self.root.after(0, lambda p=path: self._add_failed(p, "err_drm", "log_drm"))
+                    self._post(self._add_failed, path, "err_drm", "log_drm")
                     continue
                 except unlock.BrokenArchive:
-                    self.root.after(0, lambda p=path: self._add_failed(p, "err_open_failed", "log_skipped"))
+                    self._post(self._add_failed, path, "err_open_failed", "log_skipped")
                     continue
                 except Exception:
-                    self.root.after(0, lambda p=path: self._add_failed(p, "err_open_failed", "log_skipped"))
+                    self._post(self._add_failed, path, "err_open_failed", "log_skipped")
                     continue
-                self.root.after(0, lambda a=analysis: self._add_done(gen, a))
-            self.root.after(0, lambda: self._analysis_finished(gen))
+                self._post(self._add_done, gen, analysis)
+            self._post(self._analysis_finished, gen)
 
         self.analyzer = threading.Thread(target=work, daemon=True)
         self.analyzer.start()
@@ -355,29 +393,29 @@ class App:
                 base = done
 
                 def progress(i: int, n: int, _item: str, _base=base, _idx=index, _name=name) -> None:
-                    self.root.after(0, lambda: self._on_progress(_base + i, _idx, len(files), _name))
+                    self._post(self._on_progress, _base + i, _idx, len(files), _name)
 
                 try:
                     result = unlock.process_epub(path, opts, progress=progress, cancel=self.cancel_event)
                 except unlock.Cancelled:
-                    self.root.after(0, lambda _n=name: self.log("log_cancelled", name=_n))
-                    self.root.after(0, lambda: self._finished(True, count, skipped, totals))
+                    self._post(self.log, "log_cancelled", name=name)
+                    self._post(self._finished, True, count, skipped, totals)
                     return
                 except unlock.DrmProtected:
-                    self.root.after(0, lambda _n=name: self.log("log_drm", name=_n))
+                    self._post(self.log, "log_drm", name=name)
                     skipped += 1
                     continue
                 except Exception as exc:  # one bad book must not end the batch
-                    self.root.after(0, lambda _n=name, _e=exc: self.log("err_file_failed", name=_n, error=str(_e)))
+                    self._post(self.log, "err_file_failed", name=name, error=str(exc))
                     skipped += 1
                     continue
                 finally:
                     done = base + max(1, self.analyses[path].css_files + self.analyses[path].xhtml_files)
-                    self.root.after(0, lambda _d=done: self.progress.configure(value=_d))
+                    self._post(self._set_progress, done)
                 for item, error in result.failed:
-                    self.root.after(0, lambda _i=item, _e=error: self.log("err_css_failed", name=_i, error=_e))
+                    self._post(self.log, "err_css_failed", name=item, error=error)
                 if result.already_unlocked:
-                    self.root.after(0, lambda _n=name: self.log("log_already", name=_n))
+                    self._post(self.log, "log_already", name=name)
                     skipped += 1
                     continue
                 c = result.counts
@@ -387,11 +425,14 @@ class App:
                 totals.margins += c.margins
                 count += 1
                 self.outputs.append(result.output_path)
-                self.root.after(0, lambda _p=result.output_path: self.log("log_saved", path=_p))
-            self.root.after(0, lambda: self._finished(False, count, skipped, totals))
+                self._post(self.log, "log_saved", path=result.output_path)
+            self._post(self._finished, False, count, skipped, totals)
 
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
+
+    def _set_progress(self, value: int) -> None:
+        self.progress.configure(value=value)
 
     def _on_progress(self, done: int, file_index: int, files: int, name: str) -> None:
         self.progress.configure(value=done)

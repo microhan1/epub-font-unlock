@@ -225,6 +225,20 @@ class Markup(unittest.TestCase):
         src = '<div data-x="a>b" style="font-size:9pt">t</div>'
         self.assertEqual(page(src)[0], src)
 
+    def test_a_page_that_is_not_well_formed_xml_is_still_handled(self) -> None:
+        """Real converted books turn up with a bare & or < in the text. We do
+        not parse the markup, so they are still unlocked -- and the broken
+        characters are handed back exactly as they came."""
+        src = ('<?xml version="1.0" encoding="utf-8"?>\n'
+               '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+               '<p style="font-size: 9pt">a & b, 5 < 6, AT&T</p>'
+               '<p style="line-height: 14px">tail</p></body></html>')
+        out, c = page(src)
+        self.assertEqual(c.inline, 2)
+        self.assertIn("a & b, 5 < 6, AT&T", out)
+        self.assertNotIn("9pt", out)
+        self.assertNotIn("14px", out)
+
     def test_several_style_blocks(self) -> None:
         out, _ = page("<style>p{font-size:9pt}</style><style>h1{font-size:8pt}</style>")
         self.assertNotIn("9pt", out)

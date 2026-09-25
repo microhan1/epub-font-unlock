@@ -12,6 +12,7 @@ What has to hold, whatever came in:
 """
 from __future__ import annotations
 
+import os
 import random
 import re
 import sys
@@ -23,8 +24,10 @@ import tinycss2  # noqa: E402
 import unlock  # noqa: E402
 from unlock import Counts, Options  # noqa: E402
 
-ROUNDS = 400
-SEED = 20260920
+# A deeper sweep on demand, without editing the file:
+#   EFU_FUZZ_ROUNDS=20000 EFU_FUZZ_SEED=7 python -m unittest test_fuzz
+ROUNDS = int(os.environ.get("EFU_FUZZ_ROUNDS", "400"))
+SEED = int(os.environ.get("EFU_FUZZ_SEED", "20260920"))
 
 ABS = ["11pt", "12px", "0.5cm", "3mm", "1in", "2pc", "10Q", "12PX", "11Pt"]
 REL = ["1em", "120%", "1.2rem", "larger", "smaller", "medium", "x-large", "1.5ex"]
