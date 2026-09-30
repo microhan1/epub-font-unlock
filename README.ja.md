@@ -62,3 +62,5 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 ## ライセンス
 
 MIT。[LICENSE](LICENSE) を参照してください。
+
+配布している exe には Python、Tcl/Tk などのサードパーティ製コンポーネントも含まれています。コンポーネントとライセンス全文は [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) にあります。

@@ -62,3 +62,5 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 ## 许可证
 
 MIT。参见 [LICENSE](LICENSE)。
+
+发布的 exe 还包含 Python、Tcl/Tk 等第三方组件，组件及其许可证全文见 [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt)。

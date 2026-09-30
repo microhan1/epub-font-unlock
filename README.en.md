@@ -62,3 +62,5 @@ A heading staying larger than the body text is a relative promise, and it surviv
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The released exe also bundles third-party components such as Python and Tcl/Tk. They and their full license texts are listed in [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt).
