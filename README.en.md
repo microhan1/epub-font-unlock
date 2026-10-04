@@ -4,7 +4,7 @@
 
 Removes hard-coded fonts, font sizes and line spacing from EPUB files so the font settings on your e-reader actually apply. Not a single character of the book's text is changed. No server, no install, the original file is never modified.
 
-> **DRM-protected EPUBs are not processed.** Most books bought from a store are. This tool neither removes nor works around DRM; it reports the file and skips it.
+> **DRM-protected EPUBs are not processed.** Most books bought from a store are. This tool neither removes nor works around DRM; it reports the file and skips it. Font **obfuscation**, which Sigil and InDesign apply when they embed a font, is not DRM, so those books are processed.
 
 ![Before and after](docs/before_after.png)
 
@@ -50,9 +50,9 @@ A heading staying larger than the body text is a relative promise, and it surviv
 ## What it does not do
 
 - It does not change the body text.
-- It does not open DRM-protected EPUBs. It reports them and moves on.
+- It does not open DRM-protected EPUBs. It reports them and moves on. A `META-INF/encryption.xml` is treated as not-DRM only when everything listed in it is font obfuscation; one other kind of entry, or a file that cannot be read, and the book counts as DRM and is skipped.
 - It does not convert between EPUB 2 and EPUB 3, or restructure the book.
-- It does not touch the cover, the table of contents (NCX or nav), or the metadata (OPF). The one exception: when you remove embedded font files, the OPF manifest items pointing at those files go too, because a manifest entry for a missing file fails epubcheck.
+- It does not touch the cover, the table of contents (NCX or nav), or the metadata (OPF). The one exception: when you remove embedded font files, the OPF manifest items and the `encryption.xml` entries pointing at those files go too, because an entry for a missing file fails epubcheck.
 
 ## Series
 

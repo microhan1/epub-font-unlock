@@ -21,6 +21,20 @@ MIMETYPE_NAME = "mimetype"
 MIMETYPE_VALUE = b"application/epub+zip"
 ENCRYPTION_PATH = "META-INF/encryption.xml"
 CONTAINER_PATH = "META-INF/container.xml"
+# Rights files written by DRM systems (Adobe ADEPT, Apple FairPlay). Fonts that
+# are merely obfuscated never come with one.
+RIGHTS_PATHS = ("META-INF/rights.xml", "META-INF/sinf.xml")
+
+# encryption.xml is not only for DRM. The EPUB spec has it list embedded fonts
+# that have been obfuscated -- XOR-ed with the book's identifier so that a font
+# cannot simply be lifted out of the file. That is a licensing courtesy, not
+# protection: the key is the book's own identifier, and every reading system
+# undoes it. Sigil and InDesign write it whenever they embed a font, so these
+# are exactly the books whose typography is pinned down.
+FONT_OBFUSCATION_ALGORITHMS = frozenset({
+    "http://www.idpf.org/2008/embedding",   # the EPUB OCF algorithm
+    "http://ns.adobe.com/pdf/enc#RC",       # Adobe's older font mangling
+})
 
 CSS_EXTS = (".css",)
 XHTML_EXTS = (".xhtml", ".html", ".htm", ".xht")
@@ -38,7 +52,7 @@ class BrokenArchive(EpubError):
 
 
 class DrmProtected(EpubError):
-    """META-INF/encryption.xml is present; the content may be encrypted."""
+    """Something in the book is really encrypted, or carries a DRM rights file."""
 
 
 class Cancelled(EpubError):
@@ -64,6 +78,40 @@ class Entry:
 
     def has_ext(self, exts: tuple[str, ...]) -> bool:
         return self.name.lower().endswith(exts)
+
+
+def _local(tag: str) -> str:
+    """An element's name without its namespace, so enc:EncryptedData and a bare
+    EncryptedData are the same thing."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def only_font_obfuscation(encryption_xml: bytes) -> bool:
+    """Does this encryption.xml describe nothing but obfuscated fonts?
+
+    True is the narrow answer: every entry names a font-obfuscation algorithm
+    and nothing carries a key. Anything else -- another algorithm, an entry with
+    no algorithm, a wrapped key, a file that does not parse -- counts as DRM,
+    because the cost of being wrong is not symmetric. Refusing a book that was
+    only obfuscated sends its owner to a different tool; unlocking one that is
+    really encrypted would rewrite ciphertext.
+    """
+    try:
+        root = ElementTree.fromstring(encryption_xml)
+    except ElementTree.ParseError:
+        return False
+    for element in root.iter():
+        name = _local(element.tag)
+        if name == "EncryptedKey":
+            return False
+        if name != "EncryptedData":
+            continue
+        methods = [c for c in element.iter() if _local(c.tag) == "EncryptionMethod"]
+        if not methods:
+            return False
+        if any(m.get("Algorithm") not in FONT_OBFUSCATION_ALGORITHMS for m in methods):
+            return False
+    return True
 
 
 def _member_name(info: zipfile.ZipInfo) -> str:
@@ -97,7 +145,9 @@ def read_epub(path: str) -> list[Entry]:
     try:
         with zipfile.ZipFile(path, "r") as zf:
             names = zf.namelist()
-            if ENCRYPTION_PATH in names:
+            if any(rights in names for rights in RIGHTS_PATHS):
+                raise DrmProtected(path)
+            if ENCRYPTION_PATH in names and not only_font_obfuscation(zf.read(ENCRYPTION_PATH)):
                 raise DrmProtected(path)
             entries = []
             for info in zf.infolist():

@@ -4,7 +4,7 @@
 
 删除 EPUB 中固定的字体、字号和行距，让电子书阅读器里的字体设置真正生效。正文一个字也不改。无服务器，无需安装，绝不修改原文件。
 
-> **不处理有 DRM 保护的 EPUB。** 在书店购买的书大多如此。本工具既不破解也不绕过 DRM，只会提示并跳过。
+> **不处理有 DRM 保护的 EPUB。** 在书店购买的书大多如此。本工具既不破解也不绕过 DRM，只会提示并跳过。不过 Sigil、InDesign 嵌入字体时使用的**字体混淆**不属于 DRM，这类书会正常处理。
 
 ![处理前后](docs/before_after.png)
 
@@ -50,9 +50,9 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 ## 不做的事
 
 - 不改动正文文字。
-- 不打开有 DRM 保护的 EPUB，只提示并跳过。
+- 不打开有 DRM 保护的 EPUB，只提示并跳过。即使存在 `META-INF/encryption.xml`，只有其中全部是字体混淆时才视为非 DRM；只要混入任何其他方式，或文件无法读取，就按 DRM 处理并跳过。
 - 不做 EPUB2 与 EPUB3 之间的转换，也不重建结构。
-- 不改动封面、目录（NCX、nav）和元数据（OPF）。唯一的例外：删除内嵌字体文件时，会一并删除 OPF manifest 中指向这些文件的条目，否则无法通过 epubcheck。
+- 不改动封面、目录（NCX、nav）和元数据（OPF）。唯一的例外：删除内嵌字体文件时，会一并删除 OPF manifest 和 `encryption.xml` 中指向这些文件的条目，否则无法通过 epubcheck。
 
 ## 系列
 

@@ -25,9 +25,9 @@ from tinycss2 import serialize
 
 # Re-exported so gui.py and main.py talk to one core module, as the series does.
 from epub_io import (  # noqa: F401
-    CSS_EXTS, FONT_EXTS, XHTML_EXTS, BrokenArchive, Cancelled, DrmProtected,
-    Entry, EpubError, collect_epubs, decode, opf_path, output_path_for,
-    read_epub, write_epub,
+    CSS_EXTS, ENCRYPTION_PATH, FONT_EXTS, XHTML_EXTS, BrokenArchive, Cancelled,
+    DrmProtected, Entry, EpubError, collect_epubs, decode, opf_path,
+    output_path_for, read_epub, write_epub,
 )
 
 ABSOLUTE_UNITS = frozenset({"px", "pt", "pc", "cm", "mm", "in", "q"})
@@ -699,6 +699,28 @@ def _is_content(entry) -> bool:
     return not entry.is_dir and entry.has_ext(CSS_EXTS + XHTML_EXTS)
 
 
+ENCRYPTED_DATA_RE = re.compile(
+    r"[ \t]*<(?:[\w.-]+:)?EncryptedData\b.*?</(?:[\w.-]+:)?EncryptedData>[ \t]*\r?\n?", re.S)
+CIPHER_URI_RE = re.compile(r'URI\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+
+
+def _strip_encrypted_fonts(text: str, deleted: set) -> str:
+    """Drop the encryption.xml entries for fonts that were deleted.
+
+    The URI is relative to the root of the archive, and written as XML text and
+    then as a URL, the same as an href: a&amp;b.ttf, a%20b.ttf.
+    """
+    def repl(m):
+        uri_m = CIPHER_URI_RE.search(m.group(0))
+        if not uri_m:
+            return m.group(0)
+        raw = uri_m.group(1) if uri_m.group(1) is not None else uri_m.group(2)
+        target = posixpath.normpath(unquote(html.unescape(raw)).lstrip("/"))
+        return "" if target in deleted else m.group(0)
+
+    return ENCRYPTED_DATA_RE.sub(repl, text)
+
+
 def _strip_font_manifest_items(text: str, opf_dir: str, deleted: set) -> str:
     """Drop the manifest entries for fonts we removed.
 
@@ -781,6 +803,18 @@ def _run(path: str, opts: "Options", counts: "Counts", progress=None, cancel=Non
                 break
         else:
             changed_files += 1  # fonts left the archive even if no OPF was found
+        # An obfuscated font is also listed in encryption.xml, and an entry for a
+        # file that is no longer there is an epubcheck error (RSC-007). Only the
+        # entries for what was deleted go; the file itself goes when none are left.
+        enc = next((e for e in kept if e.name == ENCRYPTION_PATH), None)
+        if enc is not None:
+            text, codec = decode(enc.data)
+            new_text = _strip_encrypted_fonts(text, deleted_fonts)
+            if new_text != text:
+                if ENCRYPTED_DATA_RE.search(new_text):
+                    enc.data = new_text.encode(codec, "strict")
+                else:
+                    kept.remove(enc)
     return kept, changed_files, failed
 
 

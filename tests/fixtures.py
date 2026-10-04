@@ -81,7 +81,41 @@ p { font-family: "Bundled", serif; font-size: 12px; }
 """
 
 
-def build(path: str, files: dict, *, encryption: bool = False, mimetype: bool = True,
+ENC_HEAD = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container"'
+            ' xmlns:enc="http://www.w3.org/2001/04/xmlenc#">\n')
+
+IDPF = "http://www.idpf.org/2008/embedding"
+ADOBE_FONTS = "http://ns.adobe.com/pdf/enc#RC"
+AES = "http://www.w3.org/2001/04/xmlenc#aes128-cbc"
+
+
+def encrypted_data(uri: str, algorithm: str, prefix: str = "enc:") -> str:
+    return (f'  <{prefix}EncryptedData>\n'
+            f'    <{prefix}EncryptionMethod Algorithm="{algorithm}"/>\n'
+            f'    <{prefix}CipherData><{prefix}CipherReference URI="{uri}"/></{prefix}CipherData>\n'
+            f'  </{prefix}EncryptedData>\n')
+
+
+def encryption_xml(*entries: tuple[str, str]) -> str:
+    """An encryption.xml listing (uri, algorithm) pairs."""
+    return ENC_HEAD + "".join(encrypted_data(u, a) for u, a in entries) + "</encryption>\n"
+
+
+# A book that really is encrypted: the chapter itself is under AES.
+ADOBE_DRM = encryption_xml(("OEBPS/ch1.xhtml", AES))
+
+
+def obfuscated(font: bytes, identifier: str = "urn:uuid:fixture") -> bytes:
+    """IDPF font obfuscation as Sigil writes it: the first 1040 bytes XOR-ed
+    with the SHA-1 of the identifier, the 20-byte key repeating."""
+    import hashlib
+    key = hashlib.sha1("".join(identifier.split()).encode("utf-8")).digest()
+    return bytes(b ^ key[i % 20] for i, b in enumerate(font[:1040])) + font[1040:]
+
+
+def build(path: str, files: dict, *, encryption: "bool | str | bytes" = False,
+          rights: bool = False, mimetype: bool = True,
           opf_items: str | None = None) -> str:
     """Write an EPUB whose content files are given as {zip name: text or bytes}."""
     items = opf_items if opf_items is not None else (
@@ -94,7 +128,12 @@ def build(path: str, files: dict, *, encryption: bool = False, mimetype: bool = 
     entries.append(("META-INF/container.xml", CONTAINER.format(opf="OEBPS/content.opf").encode("utf-8"),
                     zipfile.ZIP_DEFLATED))
     if encryption:
-        entries.append(("META-INF/encryption.xml", b"<encryption/>", zipfile.ZIP_DEFLATED))
+        # True is a book that really is encrypted; text or bytes are used as given.
+        blob = ADOBE_DRM if encryption is True else (
+            encryption.encode("utf-8") if isinstance(encryption, str) else encryption)
+        entries.append(("META-INF/encryption.xml", blob, zipfile.ZIP_DEFLATED))
+    if rights:
+        entries.append(("META-INF/rights.xml", b"<rights/>", zipfile.ZIP_DEFLATED))
     entries.append(("OEBPS/content.opf", OPF.format(items=items).encode("utf-8"), zipfile.ZIP_DEFLATED))
     for name, data in files.items():
         blob = data.encode("utf-8") if isinstance(data, str) else data
@@ -122,6 +161,18 @@ def already_unlocked(path: str) -> str:
 def with_broken_css(path: str) -> str:
     return build(path, {"OEBPS/style.css": CSS, "OEBPS/bad.css": BROKEN_CSS,
                         "OEBPS/ch1.xhtml": XHTML})
+
+
+def with_obfuscated_font(path: str, algorithm: str = IDPF) -> str:
+    """A book the way Sigil or InDesign leaves it after embedding a font: the
+    font is obfuscated and encryption.xml lists it. Nothing is encrypted."""
+    items = ('    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>\n'
+             '    <item id="css" href="style.css" media-type="text/css"/>\n'
+             '    <item id="font" href="bundled.ttf" media-type="font/ttf"/>')
+    font = obfuscated(b"\x00\x01\x00\x00" + b"font bytes " * 200)
+    return build(path, {"OEBPS/style.css": FONT_CSS, "OEBPS/ch1.xhtml": XHTML,
+                        "OEBPS/bundled.ttf": font},
+                 encryption=encryption_xml(("OEBPS/bundled.ttf", algorithm)), opf_items=items)
 
 
 def with_font(path: str) -> str:
