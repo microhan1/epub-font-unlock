@@ -41,6 +41,7 @@
   "file_dialog_epub": "EPUB 文件",
   "log_added": "已添加：{name}",
   "log_skipped": "已跳过：{name}",
+  "log_queued": "当前任务结束后添加：{count} 个",
   "log_saved": "已保存：{path}",
   "log_already": "{name}：已经解锁，未生成结果文件",
   "log_drm": "DRM：{name}",

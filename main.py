@@ -77,14 +77,19 @@ def _print_analysis(counts: unlock.Counts) -> None:
 
 def run_cli(args: argparse.Namespace) -> int:
     files = unlock.collect_epubs(args.inputs)
+    failures = processed = skipped = 0
     for p in args.inputs:
-        if not os.path.exists(p):
+        # A folder may hold anything; only the books in it count. But a path
+        # named outright that is missing, or is not an EPUB, is a mistake the
+        # caller should hear about -- and a script that passed three paths and
+        # got exit 0 back would never know one was a typo.
+        if not os.path.isdir(p) and not (os.path.isfile(p) and p.lower().endswith(".epub")):
             print(t("err_open_failed", name=p), file=sys.stderr)
+            failures += 1
     if not files:
         print(t("cli_no_input"), file=sys.stderr)
         return 2
     opts = options_from(args)
-    failures = processed = skipped = 0
     for index, path in enumerate(files, 1):
         name = os.path.basename(path)
         print(t("cli_processing", index=index, total=len(files), name=name))

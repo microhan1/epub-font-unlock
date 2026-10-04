@@ -36,7 +36,11 @@ FAMS = ['"Nanum Myeongjo"', "Batang, serif", "'Nanum Gothic'", "serif", "inherit
 SEL = ["p", "div", "p.first", "div > p", ".note", "h1", "body", "p, div", "p, table",
        "*", "td", "p::first-line", "#id p", "blockquote p:not(.x)"]
 OTHER = ["color: #333", "text-align: justify", "text-indent: 1em", "background: url('a.png')",
-         "font-weight: bold", "--custom: Batang", "font-variant: small-caps"]
+         "font-weight: bold", "--custom: Batang", "font-variant: small-caps",
+         # declarations the parser rejects: IE hacks, a missing colon, a bare word.
+         # They must come through untouched and must not stop the rest being read.
+         "*zoom: 1", "_height: 1px", "font-size 12px", "color red", "!important",
+         "background: url(data:image/png;base64,AAA)"]
 WS = ["", " ", "\n", "\n  ", "\t", "\n\n"]
 COMMENTS = ["", "/* c */", "/* 주석 */", "/**/"]
 TEXT = ["본문입니다.", "Plain text.", "a < b & c > d", 'style="font-size: 9pt" 를 언급함', ""]

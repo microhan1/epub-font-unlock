@@ -43,7 +43,7 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 | 글꼴 | `font-family` | 내장 폰트 파일과 `@font-face` (옵션으로 삭제) |
 | 글자 크기 | `font-size`의 px·pt·cm 같은 절대값 | `em`, `%`, `rem`, `larger` 같은 상대값 |
 | 줄간격 | `line-height`의 절대값 | 단위 없는 숫자, `%`, `em` |
-| 여백 (옵션) | `p`, `div`의 `margin`·`padding` 절대값 | `0`, 상대값, 표·그림의 여백 |
+| 여백 (옵션) | `p`, `div`의 `margin`·`padding` 절대값 | `0`, 상대값, `auto`(가운데 정렬), 표·그림의 여백 |
 
 제목이 본문보다 크다는 약속(상대값)은 처리 후에도 그대로 남습니다. CSS 파일, XHTML 안의 `<style>` 블록, 그리고 태그의 `style="..."` 속성에 같은 규칙을 적용합니다.
 

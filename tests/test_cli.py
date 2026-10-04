@@ -118,6 +118,43 @@ class ExitCodes(Base):
         self.assertEqual(code, 130)
         self.assertIn(i18n.t("status_cancelled"), out)
 
+    def test_a_typo_among_good_paths_is_one_not_zero(self) -> None:
+        """A script that passes three paths and gets exit 0 back never learns
+        that one of them was a typo."""
+        good = self.book()
+        code, out, err = self.main([good, self.path("typo.epub"), "--font"])
+        self.assertEqual(code, 1)
+        self.assertIn("typo.epub", err)
+        self.assertIn("book_unlocked.epub", out)  # the good one was still done
+
+    def test_a_file_that_is_not_an_epub_is_reported_not_ignored(self) -> None:
+        good = self.book()
+        notes = self.path("notes.txt")
+        with open(notes, "w", encoding="utf-8") as f:
+            f.write("not a book")
+        code, out, err = self.main([notes, good, "--font"])
+        self.assertEqual(code, 1)
+        self.assertIn("notes.txt", err)
+        self.assertIn("book_unlocked.epub", out)
+
+    def test_only_a_non_epub_file_is_two_and_still_reported(self) -> None:
+        notes = self.path("notes.txt")
+        with open(notes, "w", encoding="utf-8") as f:
+            f.write("x")
+        code, _, err = self.main([notes, "--font"])
+        self.assertEqual(code, 2)
+        self.assertIn("notes.txt", err)
+
+    def test_a_folder_full_of_other_files_is_not_an_error(self) -> None:
+        """Only a path named outright is held to being an EPUB; what a folder
+        contains is just looked through."""
+        self.book()
+        with open(self.path("notes.txt"), "w", encoding="utf-8") as f:
+            f.write("x")
+        code, _, err = self.main([self.dir, "--font"])
+        self.assertEqual(code, 0)
+        self.assertNotIn("notes.txt", err)
+
     def test_an_unknown_option_is_two(self) -> None:
         old = sys.stderr
         sys.stderr = io.StringIO()

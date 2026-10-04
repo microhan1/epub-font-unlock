@@ -13,7 +13,9 @@ stable. Anything we did not fully understand is left exactly as it was.
 """
 from __future__ import annotations
 
+import bisect
 import dataclasses
+import html
 import posixpath
 import re
 from urllib.parse import unquote
@@ -71,7 +73,10 @@ ATTR_RE = re.compile(
     r'(\s+)([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s"\'>]+)))?', re.S)
 # script is in here because its body is code, not markup: a JavaScript string
 # holding '<p style="...">' must not be mistaken for a tag and rewritten.
-RAW_EL_RE = re.compile(r"<(style|script)\b[^<>]*>(.*?)</\s*\1\s*>", re.I | re.S)
+# The opening tag must not end in "/>": <script src="a.js"/> is a complete
+# element with no body, and treating it as an opening tag made the "body" run on
+# to the next </script> anywhere later in the page, swallowing real content.
+RAW_EL_RE = re.compile(r"<(style|script)\b[^<>]*(?<!/)>(.*?)</\s*\1\s*>", re.I | re.S)
 COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 CDATA_RE = re.compile(r"\A(\s*<!\[CDATA\[)(.*)(\]\]>\s*)\Z", re.S)
 CDO_WRAP_RE = re.compile(r"\A(\s*<!--)(.*)(-->\s*)\Z", re.S)
@@ -212,7 +217,55 @@ def _subject_is_prose(prelude) -> bool:
 # ------------------------------------------------------------- declarations
 
 def _decl_nodes(text: str) -> list:
-    return tinycss2.parse_declaration_list(text, skip_comments=False, skip_whitespace=False)
+    """Declarations in a rule body or a style attribute, with whatever the
+    parser rejects kept word for word.
+
+    tinycss2's own declaration-list parser turns anything it cannot read -- an
+    IE hack like `*zoom: 1`, a typo, a nested rule -- into an error node that
+    has lost its source and cannot be serialized, so a single bad declaration
+    next to one we wanted to remove made the whole stylesheet unwritable and it
+    was skipped. Browsers ignore such declarations; so can we. The body is cut
+    at its top-level semicolons, each piece is parsed on its own, and a piece
+    that is not exactly one declaration goes back out as it came in.
+    """
+    segments: list[tuple[list, bool]] = []
+    current: list = []
+    for token in tinycss2.parse_component_value_list(text, skip_comments=False):
+        if token.type == "literal" and token.value == ";":
+            segments.append((current, True))
+            current = []
+        else:
+            current.append(token)
+    if current:
+        segments.append((current, False))
+
+    nodes: list = []
+    for tokens, terminated in segments:
+        source = serialize(tokens)
+        parsed = tinycss2.parse_declaration_list(source, skip_comments=False, skip_whitespace=False)
+        meaningful = [n for n in parsed if n.type not in ("whitespace", "comment")]
+        if not meaningful or (len(meaningful) == 1 and meaningful[0].type == "declaration"):
+            # Only whitespace and comments, or exactly one declaration. Whitespace
+            # has to stay a whitespace node: removing a declaration also removes
+            # the whitespace that followed it, and that is how it is found.
+            nodes.extend(parsed)
+            continue
+        if any(t.type == "{} block" for t in tokens) and not _is_custom_property(tokens):
+            # CSS nesting: p { & span { ... } font-size: 11pt }. The nested rule
+            # and the declaration after it arrive as one unreadable piece, so
+            # `font-size: 11pt` would stay behind while the run reported success.
+            raise CssParseError("nested rules are not supported")
+        nodes.append(tinycss2.ast.LiteralToken(0, 0, source + (";" if terminated else "")))
+    return nodes
+
+
+def _is_custom_property(tokens) -> bool:
+    """--name: { ... } holds a block legitimately; it is a declaration, not nesting."""
+    for token in tokens:
+        if token.type in ("whitespace", "comment"):
+            continue
+        return token.type == "ident" and token.value.startswith("--")
+    return False
 
 
 def _stylesheet_nodes(text: str) -> list:
@@ -370,6 +423,11 @@ def _rewrite_declaration(decl, opts: "Options", counts: "Counts", prose: bool):
         counts.lines += 1
         return []
     if name in MARGIN_PROPS and opts.margin and prose and _has_absolute(decl.value, ignore_zero=True):
+        # `margin: 0 auto 12px` centres the block. Dropping the whole declaration
+        # for the sake of the 12px would drop the centring with it, and centring
+        # is layout, not a size anyone's reader setting is meant to override.
+        if any(v.type == "ident" and v.lower_value == "auto" for v in decl.value):
+            return None
         counts.margins += 1
         return []
     return None
@@ -408,7 +466,8 @@ def _filter_rules(nodes, opts: "Options", counts: "Counts"):
         i += 1
         if node.type == "qualified-rule":
             prose = _subject_is_prose(node.prelude)
-            content, ch = _filter_declarations(_decl_nodes(serialize(node.content)), opts, counts, prose)
+            content, ch = _filter_declarations(_decl_nodes(serialize(node.content)),
+                                               opts, counts, prose)
             if ch:
                 node.content = content
                 changed = True
@@ -493,6 +552,30 @@ def unlock_style_attr(value: str, opts: "Options", counts: "Counts", prose: bool
         raise CssParseError(str(exc)) from exc
 
 
+def _merge_spans(spans: list[tuple[int, int]]) -> tuple[list[int], list[int]]:
+    """Union of half-open spans as two sorted lists, ready for bisect.
+
+    Spans can nest or touch -- a comment that contains a whole <style> element
+    -- so they are merged before anything is looked up in them.
+    """
+    starts: list[int] = []
+    ends: list[int] = []
+    for start, end in sorted(spans):
+        if ends and start <= ends[-1]:
+            ends[-1] = max(ends[-1], end)
+        else:
+            starts.append(start)
+            ends.append(end)
+    return starts, ends
+
+
+def _inside(starts: list[int], ends: list[int], pos: int) -> bool:
+    """Is pos within one of the merged spans? O(log n), where scanning the
+    list for every tag made a chapter with thousands of tags take minutes."""
+    i = bisect.bisect_right(starts, pos) - 1
+    return i >= 0 and pos < ends[i]
+
+
 def _iter_attrs(tag: str, pos: int):
     """Walk a tag's attributes left to right from the end of its name. Stepping
     attribute by attribute is what keeps a quoted value from being searched."""
@@ -527,12 +610,14 @@ def unlock_xhtml(text: str, opts: "Options", counts: "Counts") -> tuple[str, boo
     # Commented-out markup renders nowhere, so there is nothing to unlock in it
     # and no reason to touch it. A <!-- inside a script body is that script's
     # business, not a comment, so those are ignored here.
+    code_starts, code_ends = _merge_spans(raw_spans)
     for m in COMMENT_RE.finditer(text):
-        if not any(s <= m.start() < e for s, e in raw_spans):
+        if not _inside(code_starts, code_ends, m.start()):
             raw_spans.append(m.span())
+    skip_starts, skip_ends = _merge_spans(raw_spans)
 
     for m in TAG_RE.finditer(text):
-        if any(s <= m.start() < e for s, e in raw_spans):
+        if _inside(skip_starts, skip_ends, m.start()):
             continue
         tag = m.group(0)
         name_m = TAG_NAME_RE.match(tag)
@@ -564,16 +649,27 @@ def unlock_xhtml(text: str, opts: "Options", counts: "Counts") -> tuple[str, boo
 
     if not repls:
         return text, False, errors
-    out = text
-    for start, end, new in sorted(repls, reverse=True):
-        out = out[:start] + new + out[end:]
-    return out, True, errors
+    # One pass, front to back. Rebuilding the whole string once per replacement
+    # copies the page n times over, which is quadratic: 64,000 inline styles in
+    # a 6 MB chapter took nearly four minutes that way.
+    pieces: list[str] = []
+    pos = 0
+    for start, end, new in sorted(repls):
+        if start < pos:  # cannot happen -- tags and style bodies are disjoint
+            continue
+        pieces.append(text[pos:start])
+        pieces.append(new)
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces), True, errors
 
 
 # -------------------------------------------------------------- whole books
 
+# (?:\w+:)? because a package document may prefix its elements (<opf:item>).
 MANIFEST_ITEM_RE = re.compile(
-    r"[ \t]*<item\b[^<>]*?(?:/>|>\s*</\s*item\s*>)[ \t]*\r?\n?", re.I | re.S)
+    r"[ \t]*<(?:[\w.-]+:)?item\b[^<>]*?(?:/>|>\s*</\s*(?:[\w.-]+:)?item\s*>)[ \t]*\r?\n?",
+    re.I | re.S)
 HREF_RE = re.compile(r'href\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', re.I)
 
 
@@ -615,20 +711,27 @@ def _strip_font_manifest_items(text: str, opf_dir: str, deleted: set) -> str:
         href_m = HREF_RE.search(m.group(0))
         if not href_m:
             return m.group(0)
-        href = unquote(href_m.group(1) if href_m.group(1) is not None else href_m.group(2))
+        raw = href_m.group(1) if href_m.group(1) is not None else href_m.group(2)
+        # The attribute is XML text first (a file called a&b.ttf is written
+        # a&amp;b.ttf), and only then a URL (a space is %20).
+        href = unquote(html.unescape(raw))
         joined = posixpath.join(opf_dir, href) if opf_dir else href
         return "" if posixpath.normpath(joined) in deleted else m.group(0)
 
     return MANIFEST_ITEM_RE.sub(repl, text)
 
 
-def _run(path: str, opts: "Options", counts: "Counts", progress=None, cancel=None):
+def _run(path: str, opts: "Options", counts: "Counts", progress=None, cancel=None,
+         entries: "list[Entry] | None" = None):
     """Shared engine for analysis and processing.
 
     Returns (entries, changed_files, failed). The analysis pass calls it with
-    every option on and throws the entries away.
+    every option on and throws the entries away. It hands in the entries it has
+    already read: reading a 78 MB book a second time put analysis at 2.3 times
+    the size of the file in memory instead of 1.2.
     """
-    entries = read_epub(path)
+    if entries is None:
+        entries = read_epub(path)
     failed: list = []
     deleted_fonts: set = set()
 
@@ -688,7 +791,7 @@ def analyze_epub(path: str) -> "Analysis":
     entries = read_epub(path)
     css = sum(1 for e in entries if _is_content(e) and e.has_ext(CSS_EXTS))
     xhtml = sum(1 for e in entries if _is_content(e) and e.has_ext(XHTML_EXTS))
-    _, _, failed = _run(path, Options.all_on(), counts)
+    _, _, failed = _run(path, Options.all_on(), counts, entries=entries)
     return Analysis(path=path, counts=counts, css_files=css, xhtml_files=xhtml, failed=failed)
 
 

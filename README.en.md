@@ -43,7 +43,7 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 | Font | `font-family` | Embedded font files and `@font-face` (optional removal) |
 | Font size | Absolute `font-size` in px, pt, cm and the like | Relative values: `em`, `%`, `rem`, `larger` |
 | Line height | Absolute `line-height` | Unitless numbers, `%`, `em` |
-| Margins (optional) | Absolute `margin`/`padding` on `p` and `div` | `0`, relative values, table and figure spacing |
+| Margins (optional) | Absolute `margin`/`padding` on `p` and `div` | `0`, relative values, `auto` (centring), table and figure spacing |
 
 A heading staying larger than the body text is a relative promise, and it survives. The same rules apply to CSS files, to `<style>` blocks inside XHTML, and to `style="..."` attributes on tags.
 

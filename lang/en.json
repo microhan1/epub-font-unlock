@@ -41,6 +41,7 @@
   "file_dialog_epub": "EPUB files",
   "log_added": "Added: {name}",
   "log_skipped": "Skipped: {name}",
+  "log_queued": "Will be added when the current work finishes: {count}",
   "log_saved": "Saved: {path}",
   "log_already": "{name}: already unlocked, no output written",
   "log_drm": "DRM: {name}",

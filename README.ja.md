@@ -43,7 +43,7 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 | フォント | `font-family` | 埋め込みフォントファイルと `@font-face`（オプションで削除） |
 | 文字サイズ | `font-size` の px・pt・cm などの絶対値 | `em`、`%`、`rem`、`larger` などの相対値 |
 | 行間 | `line-height` の絶対値 | 単位なしの数値、`%`、`em` |
-| 余白（オプション） | `p`、`div` の `margin`・`padding` の絶対値 | `0`、相対値、表や図の余白 |
+| 余白（オプション） | `p`、`div` の `margin`・`padding` の絶対値 | `0`、相対値、`auto`（中央揃え）、表や図の余白 |
 
 見出しが本文より大きいという約束（相対値）は処理後もそのまま残ります。CSSファイル、XHTML内の `<style>` ブロック、タグの `style="..."` 属性に同じ規則を適用します。
 

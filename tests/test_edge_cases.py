@@ -245,6 +245,74 @@ class Markup(unittest.TestCase):
         self.assertNotIn("8pt", out)
 
 
+class Scaling(unittest.TestCase):
+    """A chapter can hold tens of thousands of styled spans (Word and InDesign
+    exports do), so the cost has to grow in step with the page, not with its
+    square. The first version took 229 seconds for 64,000 spans in 6 MB."""
+
+    SPAN = '<span style="font-family: Batang; font-size: 11pt">본문 글자</span> '
+
+    def page(self, spans: int, comments: int = 0) -> str:
+        """`comments` extra comments up front; each one used to cost a scan of
+        every tag after it."""
+        lead = "".join(f"<!-- page {i} -->" for i in range(comments))
+        head = '<?xml version="1.0" encoding="utf-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml">'
+        return head + "<body>" + lead + self.SPAN * spans + "</body></html>"
+
+    def timed(self, text: str) -> float:
+        import time
+        started = time.perf_counter()
+        out, changed, errors = unlock.unlock_xhtml(text, Options(), Counts())
+        took = time.perf_counter() - started
+        self.assertTrue(changed)
+        self.assertEqual(errors, [])
+        self.assertNotIn("font-size", out)
+        self.assertEqual(out.count("<span>"), text.count("<span "))
+        return took
+
+    def test_four_times_the_spans_is_about_four_times_the_work(self) -> None:
+        small = min(self.timed(self.page(4000)) for _ in range(2))
+        large = min(self.timed(self.page(16000)) for _ in range(2))
+        # Linear is 4x; the quadratic version was 13x and climbing.
+        self.assertLess(large / small, 9.0, f"{small:.3f}s -> {large:.3f}s")
+
+    def test_many_comments_do_not_make_every_tag_slower(self) -> None:
+        plain = min(self.timed(self.page(2000)) for _ in range(2))
+        noisy = min(self.timed(self.page(2000, comments=8000)) for _ in range(2))
+        self.assertLess(noisy / plain, 3.0, f"{plain:.3f}s -> {noisy:.3f}s")
+
+    def test_the_replacements_land_in_the_right_places(self) -> None:
+        """The single-pass rebuild must put every piece back where it was."""
+        src = "".join(f'<p style="font-size: {10 + i % 5}pt">item {i}</p>' for i in range(300))
+        out, _, _ = unlock.unlock_xhtml(src, Options(), Counts())
+        self.assertEqual(out, "".join(f"<p>item {i}</p>" for i in range(300)))
+
+
+class SkipRegions(unittest.TestCase):
+    """The merged-span lookup that keeps comments and code out of the tag scan."""
+
+    def test_merge_joins_nested_and_touching_spans(self) -> None:
+        starts, ends = unlock._merge_spans([(10, 20), (12, 15), (20, 30), (40, 50), (0, 5)])
+        self.assertEqual((starts, ends), ([0, 10, 40], [5, 30, 50]))
+
+    def test_inside_is_half_open(self) -> None:
+        starts, ends = unlock._merge_spans([(10, 20), (40, 50)])
+        for pos, want in ((9, False), (10, True), (19, True), (20, False),
+                          (39, False), (40, True), (49, True), (50, False), (0, False), (99, False)):
+            self.assertEqual(unlock._inside(starts, ends, pos), want, pos)
+
+    def test_inside_with_no_spans(self) -> None:
+        self.assertFalse(unlock._inside(*unlock._merge_spans([]), 5))
+
+    def test_a_comment_wrapping_a_style_block_hides_the_tags_in_it(self) -> None:
+        src = ('<!-- <style>p{font-size:9pt}</style><p style="font-size:9pt">x</p> -->'
+               '<p style="font-size:9pt">y</p>')
+        out, c = page(src)
+        self.assertIn('<p style="font-size:9pt">x</p>', out)   # inside the comment: untouched
+        self.assertIn("<p>y</p>", out)                         # after it: unlocked
+        self.assertEqual(c.inline, 1)
+
+
 class Encodings(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = tempfile.mkdtemp(prefix="efu_enc_")
@@ -382,6 +450,176 @@ class ZipShapes(unittest.TestCase):
             self.assertEqual(len(zf.namelist()), len(entries))
 
 
+class SelfClosing(unittest.TestCase):
+    """<script src="a.js"/> is a whole element. Read as an opening tag, its
+    'body' ran on to the next </script> and ate real content."""
+
+    def test_a_self_closing_script_does_not_swallow_the_page(self) -> None:
+        src = ('<html><head><script src="a.js"/></head><body>'
+               '<p style="font-size:9pt">before the real script</p>'
+               "<script>var x = 1;</script>"
+               '<p style="font-size:9pt">after</p></body></html>')
+        out, c = page(src)
+        self.assertEqual(c.inline, 2)
+        self.assertNotIn("9pt", out)
+        self.assertIn("<script>var x = 1;</script>", out)
+        self.assertIn('<script src="a.js"/>', out)
+
+    def test_a_self_closing_style_leaves_the_markup_alone(self) -> None:
+        """It used to hand the markup to the CSS serializer, which rewrote
+        class='a' as class="a" on the way through."""
+        src = ('<html><head><style type="text/css"/></head><body>'
+               "<p class='a' style=\"font-size:9pt\">kept text</p>"
+               "<style>p{font-size:9pt}</style></body></html>")
+        out, c = page(src)
+        self.assertIn("class='a'", out)
+        self.assertNotIn("9pt", out)
+        self.assertIn("<style type=\"text/css\"/>", out)
+
+    def test_an_ordinary_script_still_hides_its_body(self) -> None:
+        src = '<script>var s = \'<p style="font-size:9pt">x</p>\';</script><p style="font-size:9pt">y</p>'
+        out, c = page(src)
+        self.assertIn('<p style="font-size:9pt">x</p>', out)
+        self.assertIn("<p>y</p>", out)
+
+
+class Nesting(unittest.TestCase):
+    """CSS nesting is read by the parser as a broken declaration that swallows
+    whatever follows it, so the declarations around it stayed in place while the
+    run reported success."""
+
+    def test_nested_rules_make_the_file_skip(self) -> None:
+        with self.assertRaises(unlock.CssParseError):
+            css("p { color: red; & span { font-size: 9pt; } font-size: 11pt; }")
+
+    def test_nesting_inside_a_media_query_skips_too(self) -> None:
+        with self.assertRaises(unlock.CssParseError):
+            css("@media screen { p { & b { color: red; } font-size: 11pt; } }")
+
+    def test_a_declaration_the_parser_rejects_does_not_stop_the_rest(self) -> None:
+        """Old hacks and typos are ignored by browsers; the rest of the file is
+        still worth unlocking. Only a nested block means the parse cannot be
+        trusted."""
+        out, c = css("p { *zoom: 1; font-size: 9pt; color: red; }")
+        self.assertNotIn("9pt", out)
+        self.assertIn("*zoom: 1", out)
+        self.assertEqual(c.sizes, 1)
+
+    def test_a_custom_property_holding_a_block_is_not_nesting(self) -> None:
+        out, c = css("p { --x: { a: b }; font-size: 9pt; }")
+        self.assertNotIn("9pt", out)
+
+
+class CentredMargins(unittest.TestCase):
+    def test_auto_keeps_a_block_centred(self) -> None:
+        for value in ("0 auto 12px", "12px auto", "0 auto", "auto"):
+            with self.subTest(value=value):
+                out, c = css(f"div.wrap {{ margin: {value}; }}", Options(margin=True))
+                self.assertIn("auto", out)
+                self.assertEqual(c.margins, 0)
+
+    def test_ordinary_absolute_margins_still_go(self) -> None:
+        out, c = css("p { margin: 0 8px 0 0; padding: 4pt; }", Options(margin=True))
+        self.assertEqual(out.strip(), "p { }")
+        self.assertEqual(c.margins, 2)
+
+
+class LyingDeclarations(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="efu_lie_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def test_utf_16_declared_over_utf_8_content(self) -> None:
+        """.NET's XmlWriter over a StringWriter writes exactly this."""
+        raw = ('<?xml version="1.0" encoding="utf-16"?>\n'
+               '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+               '<p style="font-size: 9pt">한글 본문</p></body></html>').encode("utf-8")
+        text, codec = epub_io.decode(raw)
+        self.assertEqual(codec, "utf-8")
+        self.assertIn("한글 본문", text)
+
+    def test_the_book_is_unlocked_and_stays_utf_8_without_a_bom(self) -> None:
+        raw = ('<?xml version="1.0" encoding="utf-16"?>\n'
+               '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+               '<p style="font-size: 9pt">한글 본문</p></body></html>').encode("utf-8")
+        book = fixtures.build(os.path.join(self.dir, "lie.epub"),
+                              {"OEBPS/style.css": fixtures.CSS, "OEBPS/ch1.xhtml": raw})
+        out = unlock.process_epub(book, unlock.Options()).output_path
+        with zipfile.ZipFile(out) as zf:
+            data = zf.read("OEBPS/ch1.xhtml")
+        self.assertFalse(data.startswith((b"\xff\xfe", b"\xfe\xff", b"\xef\xbb\xbf")))
+        self.assertIn("한글 본문".encode("utf-8"), data)
+        self.assertNotIn(b"9pt", data)
+
+    def test_a_declared_utf_32_is_ignored_too(self) -> None:
+        raw = b'<?xml version="1.0" encoding="UTF-32"?><p>text</p>'
+        self.assertEqual(epub_io.decode(raw)[1], "utf-8")
+
+
+class ZipNames(unittest.TestCase):
+    """A zip flags its names as UTF-8 or leaves them to be read as cp437. Tools
+    that write UTF-8 without the flag produced names like 한글.css that came
+    back as φò£Ω╕Ç.css, no longer matching the package document."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="efu_names_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def unflagged(self, real: bytes, placeholder: bytes) -> str:
+        """A book whose one stylesheet is named by raw bytes with no UTF-8 flag.
+        zipfile will not write that, so the name is patched in afterwards, in
+        the local header and in the central directory."""
+        assert len(real) == len(placeholder)
+        path = os.path.join(self.dir, "in.epub")
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("mimetype", b"application/epub+zip")
+            zf.writestr("META-INF/container.xml",
+                        fixtures.CONTAINER.format(opf="OEBPS/content.opf").encode())
+            zf.writestr("OEBPS/content.opf", b"<package/>")
+            zf.writestr(f"OEBPS/{placeholder.decode()}.css", b"p { font-size: 9pt; }")
+        with open(path, "rb") as f:
+            data = f.read()
+        self.assertEqual(data.count(placeholder), 2)
+        with open(path, "wb") as f:
+            f.write(data.replace(placeholder, real))
+        return path
+
+    def test_utf_8_names_without_the_flag_survive(self) -> None:
+        book = self.unflagged("한글".encode("utf-8"), b"abcdef")
+        out = unlock.process_epub(book, unlock.Options()).output_path
+        with zipfile.ZipFile(out) as zf:
+            self.assertIn("OEBPS/한글.css", zf.namelist())
+            self.assertNotIn("p { font-size", zf.read("OEBPS/한글.css").decode())
+
+    def test_the_output_flags_its_names_as_utf_8(self) -> None:
+        book = self.unflagged("한글".encode("utf-8"), b"abcdef")
+        out = unlock.process_epub(book, unlock.Options()).output_path
+        with zipfile.ZipFile(out) as zf:
+            info = zf.getinfo("OEBPS/한글.css")
+        self.assertTrue(info.flag_bits & 0x800)
+
+    def test_names_that_are_not_utf_8_are_refused_not_garbled(self) -> None:
+        book = self.unflagged("한글".encode("cp949"), b"abcd")
+        with self.assertRaises(unlock.BrokenArchive):
+            unlock.analyze_epub(book)
+        with self.assertRaises(unlock.BrokenArchive):
+            unlock.process_epub(book, unlock.Options())
+        self.assertEqual(sorted(os.listdir(self.dir)), ["in.epub"])
+
+    def test_ordinary_ascii_and_flagged_names_are_untouched(self) -> None:
+        book = fixtures.standard(os.path.join(self.dir, "plain.epub"))
+        out = unlock.process_epub(book, unlock.Options()).output_path
+        with zipfile.ZipFile(book) as a, zipfile.ZipFile(out) as b:
+            self.assertEqual(a.namelist(), b.namelist())
+        flagged = os.path.join(self.dir, "flagged.epub")
+        with zipfile.ZipFile(flagged, "w") as zf:
+            zf.writestr("mimetype", b"application/epub+zip")
+            zf.writestr("OEBPS/한글.css", b"p { font-size: 9pt; }")
+        out = unlock.process_epub(flagged, unlock.Options()).output_path
+        with zipfile.ZipFile(out) as zf:
+            self.assertIn("OEBPS/한글.css", zf.namelist())
+
+
 class FontFiles(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = tempfile.mkdtemp(prefix="efu_font_")
@@ -437,6 +675,56 @@ class FontFiles(unittest.TestCase):
 
     def test_counting_font_files_does_not_depend_on_the_option(self) -> None:
         self.assertEqual(unlock.analyze_epub(self.build()).counts.font_files, 2)
+
+
+class ManifestMatching(unittest.TestCase):
+    """A manifest item left pointing at a deleted font is a hard epubcheck
+    error, so every spelling of the item and of its href has to be recognised."""
+
+    CSS_ITEM = '<item id="c" href="c.css" media-type="text/css"/>'
+
+    def strip(self, item: str, deleted: str) -> str:
+        text = f"<manifest>\n  {item}\n  {self.CSS_ITEM}\n</manifest>"
+        return unlock._strip_font_manifest_items(text, "OEBPS", {f"OEBPS/fonts/{deleted}"})
+
+    def test_each_spelling_of_the_item_and_of_the_href(self) -> None:
+        cases = [
+            ("plain", '<item id="f" href="fonts/a.ttf" media-type="font/ttf"/>', "a.ttf"),
+            ("long form", '<item id="f" href="fonts/a.ttf" media-type="font/ttf"></item>', "a.ttf"),
+            ("prefixed element", '<opf:item id="f" href="fonts/a.ttf" media-type="font/ttf"/>', "a.ttf"),
+            ("prefixed long form",
+             '<opf:item id="f" href="fonts/a.ttf" media-type="font/ttf"></opf:item>', "a.ttf"),
+            ("ampersand", '<item id="f" href="fonts/a&amp;b.ttf" media-type="font/ttf"/>', "a&b.ttf"),
+            ("percent escape", '<item id="f" href="fonts/a%20b.ttf" media-type="font/ttf"/>', "a b.ttf"),
+            ("both", '<item id="f" href="fonts/a%20b&amp;c.ttf" media-type="font/ttf"/>', "a b&c.ttf"),
+            ("single quotes", "<item id='f' href='fonts/a.ttf' media-type='font/ttf'/>", "a.ttf"),
+            ("parent directory", '<item id="f" href="../OEBPS/fonts/a.ttf" media-type="font/ttf"/>', "a.ttf"),
+        ]
+        for label, item, deleted in cases:
+            with self.subTest(label=label):
+                result = self.strip(item, deleted)
+                self.assertNotIn("fonts/", result)
+                self.assertIn(self.CSS_ITEM, result)  # the neighbour is untouched
+
+    def test_an_item_for_something_else_is_kept(self) -> None:
+        item = '<item id="i" href="fonts/a.ttf.jpg" media-type="image/jpeg"/>'
+        self.assertIn(item, self.strip(item, "a.ttf"))
+        item = '<item id="f" href="fonts/other.ttf" media-type="font/ttf"/>'
+        self.assertIn(item, self.strip(item, "a.ttf"))
+
+    def test_a_font_with_an_ampersand_in_its_name_goes_cleanly(self) -> None:
+        directory = tempfile.mkdtemp(prefix="efu_amp_")
+        self.addCleanup(shutil.rmtree, directory, True)
+        items = ('    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>\n'
+                 '    <item id="css" href="style.css" media-type="text/css"/>\n'
+                 '    <item id="font" href="a&amp;b.ttf" media-type="font/ttf"/>')
+        book = fixtures.build(os.path.join(directory, "amp.epub"),
+                              {"OEBPS/style.css": fixtures.FONT_CSS, "OEBPS/ch1.xhtml": fixtures.XHTML,
+                               "OEBPS/a&b.ttf": b"font" * 40}, opf_items=items)
+        out = unlock.process_epub(book, unlock.Options(remove_font_files=True)).output_path
+        with zipfile.ZipFile(out) as zf:
+            self.assertNotIn("OEBPS/a&b.ttf", zf.namelist())
+            self.assertNotIn("a&amp;b.ttf", zf.read("OEBPS/content.opf").decode("utf-8"))
 
 
 class Cancelling(unittest.TestCase):

@@ -66,9 +66,34 @@ class Entry:
         return self.name.lower().endswith(exts)
 
 
+def _member_name(info: zipfile.ZipInfo) -> str:
+    """The member's real name.
+
+    A zip says whether its names are UTF-8 (general-purpose flag bit 11). When
+    it does not, Python reads the raw bytes as cp437. Some tools write UTF-8
+    names without setting the flag, so a Korean file name arrives as mojibake --
+    and written back out it would be encoded a second time, leaving a name that
+    no longer matches the href in the package document. The raw bytes are
+    recovered here and read as UTF-8, which is what the EPUB spec requires.
+
+    Anything else (cp949, Shift-JIS ...) cannot be told apart reliably and
+    cannot be written back byte for byte through zipfile, so the book is
+    refused rather than returned with garbled names.
+    """
+    name = info.filename
+    if info.flag_bits & 0x800 or name.isascii():
+        return name
+    try:
+        return name.encode("cp437").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError) as exc:
+        raise BrokenArchive(f"member name is not UTF-8: {name!r}") from exc
+
+
 def read_epub(path: str) -> list[Entry]:
-    """Load every member into memory. Books are a few MB, so this is cheap and
-    it means the output is built from a complete picture rather than streamed."""
+    """Load every member into memory, so the output is built from a complete
+    picture rather than streamed. That costs about the size of the book (a 78 MB
+    book of page images peaks near 95 MB); the text files are the only part that
+    is ever edited."""
     try:
         with zipfile.ZipFile(path, "r") as zf:
             names = zf.namelist()
@@ -79,7 +104,7 @@ def read_epub(path: str) -> list[Entry]:
                 data = b"" if info.is_dir() else zf.read(info)
                 entries.append(
                     Entry(
-                        name=info.filename,
+                        name=_member_name(info),
                         data=data,
                         compress_type=info.compress_type,
                         date_time=info.date_time,
@@ -203,6 +228,12 @@ def _declared_codecs(data: bytes) -> list[str]:
     m = re.search(rb'@charset\s+"([\w.-]+)"', head)
     if m:
         codecs.append(m.group(1).decode("ascii", "replace"))
+    # A declaration we could read as ASCII cannot belong to a UTF-16 or UTF-32
+    # file -- those have no ASCII bytes to read it from, and their BOM was
+    # handled before this point. So such a declaration is a lie, and a common
+    # one: .NET's XmlWriter over a StringWriter writes encoding="utf-16" above
+    # UTF-8 content. Believing it turns the page to garbage.
+    codecs = [c for c in codecs if not c.lower().replace("_", "-").startswith(("utf-16", "utf-32", "ucs"))]
     codecs.append("utf-8")
     return codecs
 

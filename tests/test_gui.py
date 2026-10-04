@@ -331,6 +331,57 @@ class GuiTest(unittest.TestCase):
 
         self.loop(app, check)
 
+    def test_nothing_is_clipped_at_any_display_scale(self) -> None:
+        """Windows scales text 100-200% depending on the screen. `tk scaling` is
+        points-to-pixels, so setting it re-lays the window out the way that
+        scale would, whatever this machine happens to be set to."""
+        app = self.app([self.book()])
+
+        def check() -> None:
+            bad: list[str] = []
+            for percent, scaling in ((100, 96 / 72), (125, 120 / 72), (150, 144 / 72),
+                                     (200, 192 / 72)):
+                app.root.tk.call("tk", "scaling", scaling)
+                for index, lang in enumerate(i18n.LANGS):
+                    app.cmb_lang.current(index)
+                    app._on_lang()  # relabels and refits the window
+                    app.root.update_idletasks()
+                    label = f"{percent}%/{lang}"
+                    bad += self.clipping(app, label)
+                    self.assertGreaterEqual(app.root.winfo_height(), app.root.winfo_reqheight(),
+                                            f"{label}: window shorter than its content")
+                    bottom = app.btn_run.winfo_rooty() + app.btn_run.winfo_height()
+                    self.assertLessEqual(bottom, app.root.winfo_rooty() + app.root.winfo_height(),
+                                         f"{label}: Run button pushed off the window")
+            self.assertEqual(bad, [])
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, check))
+
+    def test_the_window_asks_windows_for_real_pixels(self) -> None:
+        """An unaware window is drawn small and stretched, so it comes out blurry
+        on a scaled display. The shipped exe was exactly that."""
+        if sys.platform != "win32":
+            self.skipTest("Windows only")
+        import ctypes
+        import ctypes.wintypes as wt
+        app = self.app()
+
+        def check() -> None:
+            # Typed explicitly: the pseudo-handle for "this process" is -1, and
+            # ctypes would pass it as a 32-bit int, which the call then rejects.
+            kernel32, shcore = ctypes.windll.kernel32, ctypes.windll.shcore
+            kernel32.GetCurrentProcess.restype = wt.HANDLE
+            shcore.GetProcessDpiAwareness.argtypes = [wt.HANDLE, ctypes.POINTER(ctypes.c_int)]
+            awareness = ctypes.c_int(-1)
+            result = shcore.GetProcessDpiAwareness(kernel32.GetCurrentProcess(),
+                                                   ctypes.byref(awareness))
+            self.assertEqual(result, 0, f"the awareness query itself failed: {result:#x}")
+            self.assertGreaterEqual(awareness.value, 1, "the process is DPI unaware")
+            self.done(app)
+
+        self.loop(app, check)
+
     # -------------------------------------------------------------- language
     def test_switching_language_relabels_everything(self) -> None:
         app = self.app()
@@ -615,6 +666,205 @@ class GuiTest(unittest.TestCase):
             self.done(app)
 
         self.loop(app, check)
+
+    # ------------------------------------------- dropping files while busy
+    # The buttons lock while work is going on, but drag and drop does not, so a
+    # drop can arrive at any moment. Each of these was a real failure.
+    def gate(self, name: str):
+        """Hold unlock.<name> until the test lets it go, so a run or an analysis
+        can be kept in flight while the window is poked at."""
+        import threading
+        release = threading.Event()
+        real = getattr(unlock, name)
+
+        def held(*args, **kwargs):
+            release.wait(20)
+            return real(*args, **kwargs)
+
+        setattr(unlock, name, held)
+        self.addCleanup(setattr, unlock, name, real)
+        self.addCleanup(release.set)
+        return release
+
+    def test_a_drop_during_a_run_leaves_cancel_working(self) -> None:
+        app = self.app([self.book("one.epub")])
+        release = self.gate("process_epub")
+        other = self.book("two.epub")
+
+        def start() -> None:
+            app.run()
+            app.add_paths([other])  # arrives while the run is in flight
+            app.root.after(300, check)
+
+        def check() -> None:
+            self.assertTrue(app.worker.is_alive())
+            self.assertEqual(str(app.btn_cancel["state"]), "normal", "Cancel was switched off")
+            for button in (app.btn_run, app.btn_clear, app.btn_add, app.btn_add_dir):
+                self.assertEqual(str(button["state"]), "disabled")
+            self.assertEqual(str(app.cmb_lang["state"]), "disabled")
+            release.set()
+            self.after_run(app, finish)
+
+        def finish() -> None:
+            self.assertEqual(len(app.outputs), 1)
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, start))
+
+    def test_a_drop_during_a_run_is_added_once_the_run_ends(self) -> None:
+        app = self.app([self.book("one.epub")])
+        release = self.gate("process_epub")
+        other = self.book("two.epub")
+
+        def start() -> None:
+            app.run()
+            app.add_paths([other])
+            app.root.after(200, release.set)
+            self.after_run(app, wait_for_it)
+
+        def wait_for_it() -> None:
+            self.wait(app, lambda: len(app.files) == 2 and str(app.btn_run["state"]) == "normal",
+                      check, "the queued book to be analysed")
+
+        def check() -> None:
+            self.assertEqual([os.path.basename(p) for p in app.files], ["one.epub", "two.epub"])
+            self.assertEqual(len(app.outputs), 1)  # the second was not part of that run
+            self.assertEqual(self.listed(), ["one.epub", "one_unlocked.epub", "two.epub"])
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, start))
+
+    def test_clearing_during_a_run_cannot_break_the_worker(self) -> None:
+        """Clear used to come back on mid-run and empty the table the worker was
+        still reading, killing it with a KeyError before it reported."""
+        app = self.app([self.book("one.epub")])
+        release = self.gate("process_epub")
+        crashes: list = []
+        import threading
+        previous = threading.excepthook
+        threading.excepthook = lambda args: crashes.append(args.exc_value)
+        self.addCleanup(setattr, threading, "excepthook", previous)
+
+        def start() -> None:
+            app.run()
+            app.add_paths([self.book("two.epub")])
+            app.root.after(300, poke)
+
+        def poke() -> None:
+            app.clear_files()  # a press of the button, if it were enabled
+            release.set()
+            self.after_run(app, check)
+
+        def check() -> None:
+            self.assertEqual(crashes, [], "the worker thread died")
+            self.assertEqual(len(app.outputs), 1)
+            self.assertTrue(any(kind == "showinfo" and i18n.t("msg_done", count=1) in text
+                                for kind, text in self.dialogs), self.dialogs)
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, start))
+
+    def test_a_drop_during_the_analysis_is_not_lost(self) -> None:
+        app = self.app()
+        release = self.gate("analyze_epub")
+        second = self.book("second.epub")
+
+        def start() -> None:
+            app.add_paths([self.book("first.epub")])
+            app.add_paths([second])  # the first is still being read
+            app.root.after(200, release.set)
+            self.wait(app, lambda: len(app.files) == 2 and str(app.btn_run["state"]) == "normal",
+                      check, "both books")
+
+        def check() -> None:
+            self.assertEqual(sorted(os.path.basename(p) for p in app.files),
+                             ["first.epub", "second.epub"])
+            self.done(app)
+
+        self.loop(app, start)
+
+    def test_a_queued_drop_says_so(self) -> None:
+        app = self.app()
+        release = self.gate("analyze_epub")
+
+        def start() -> None:
+            app.add_paths([self.book("first.epub")])
+            app.add_paths([self.book("second.epub")])
+            log = app.txt_log.get("1.0", "end")
+            self.assertIn(i18n.t("log_queued", count=1), log)
+            release.set()
+            self.wait(app, lambda: len(app.files) == 2, lambda: self.done(app), "both books")
+
+        self.loop(app, start)
+
+    def test_the_same_book_dropped_twice_in_a_row_is_added_once(self) -> None:
+        app = self.app()
+        release = self.gate("analyze_epub")
+        book = self.book()
+
+        def start() -> None:
+            app.add_paths([book])
+            app.add_paths([book])  # while the first is still in flight
+            release.set()
+            self.wait(app, lambda: str(app.btn_run["state"]) == "normal" and app.files, check,
+                      "the analysis")
+
+        def check() -> None:
+            app.root.after(300, lambda: self.guard(app, verify))
+
+        def verify() -> None:
+            self.assertEqual(len(app.files), 1)
+            self.done(app)
+
+        self.loop(app, start)
+
+    def test_a_folder_of_refused_books_gives_one_dialog_not_one_each(self) -> None:
+        for i in range(12):
+            fixtures.build(os.path.join(self.dir, f"drm{i:02d}.epub"),
+                           {"OEBPS/style.css": fixtures.CSS, "OEBPS/ch1.xhtml": fixtures.XHTML},
+                           encryption=True)
+        app = self.app([self.dir])
+
+        def check() -> None:
+            errors = [text for kind, text in self.dialogs if kind == "showerror"]
+            self.assertEqual(len(errors), 1, f"{len(errors)} dialogs for 12 books")
+            self.assertIn("drm00.epub", errors[0])
+            self.assertEqual(app.txt_log.get("1.0", "end").count(i18n.t("log_drm", name="drm")[:4]), 12)
+            self.assertEqual(app.files, [])
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, check))
+
+    def test_a_few_refused_books_are_all_named_in_the_one_dialog(self) -> None:
+        for name in ("a.epub", "b.epub"):
+            fixtures.build(os.path.join(self.dir, name),
+                           {"OEBPS/style.css": fixtures.CSS, "OEBPS/ch1.xhtml": fixtures.XHTML},
+                           encryption=True)
+        app = self.app([self.dir])
+
+        def check() -> None:
+            errors = [text for kind, text in self.dialogs if kind == "showerror"]
+            self.assertEqual(len(errors), 1)
+            self.assertIn("a.epub", errors[0])
+            self.assertIn("b.epub", errors[0])
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, check))
+
+    def test_a_good_book_among_refused_ones_still_loads_with_one_dialog(self) -> None:
+        fixtures.build(os.path.join(self.dir, "drm.epub"),
+                       {"OEBPS/style.css": fixtures.CSS, "OEBPS/ch1.xhtml": fixtures.XHTML},
+                       encryption=True)
+        open(os.path.join(self.dir, "broken.epub"), "wb").close()
+        self.book("good.epub")
+        app = self.app([self.dir])
+
+        def check() -> None:
+            self.assertEqual([os.path.basename(p) for p in app.files], ["good.epub"])
+            self.assertEqual(len([1 for kind, _ in self.dialogs if kind == "showerror"]), 1)
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, check))
 
     # ------------------------------------------------------------- settings
     def test_options_survive_a_restart(self) -> None:

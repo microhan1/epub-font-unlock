@@ -238,6 +238,21 @@ class Analysis(Base):
         self.assertEqual(counts.margins, 1)        # p only; table td excluded
         self.assertEqual(counts.inline, 2)
 
+    def test_a_book_is_read_once_per_analysis_and_once_per_run(self) -> None:
+        """Analysis used to read the whole zip twice, holding 2.3x the file in
+        memory. A book of page images makes that matter."""
+        book = fixtures.standard(self.path("book.epub"))
+        reads = []
+        real = unlock.read_epub
+        unlock.read_epub = lambda p: (reads.append(p), real(p))[1]
+        self.addCleanup(setattr, unlock, "read_epub", real)
+
+        unlock.analyze_epub(book)
+        self.assertEqual(len(reads), 1, "analysis read the book more than once")
+        reads.clear()
+        unlock.process_epub(book, unlock.Options())
+        self.assertEqual(len(reads), 1, "a run read the book more than once")
+
     def test_analysis_writes_nothing(self) -> None:
         book = fixtures.standard(self.path("book.epub"))
         unlock.analyze_epub(book)

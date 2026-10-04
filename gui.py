@@ -27,6 +27,31 @@ except Exception:  # pragma: no cover - optional dependency
     _HAS_DND = False
 
 
+def _enable_dpi_awareness() -> None:
+    """Tell Windows this program draws at the display's real resolution.
+
+    Without it the window is laid out at 96 DPI and then stretched by Windows,
+    so on a 125-200% display (any laptop, any 4K screen) every glyph comes out
+    blurred. System-aware is chosen over per-monitor on purpose: Tk 8.6 does not
+    follow a window across monitors of different density, so per-monitor buys
+    nothing here and risks a half-scaled window.
+
+    It can only be set once per process, and must be set before the first
+    window exists; a second call is refused, which is fine.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()  # Windows 7 and older
+        except Exception:
+            pass
+
+
 def _saved_options(settings: dict) -> Options:
     """Options from settings.json, trusting nothing about its types. The file
     sits beside the exe where anyone can edit it; one wrong value must not stop
@@ -46,6 +71,7 @@ def _saved_options(settings: dict) -> Options:
 
 class App:
     def __init__(self, initial_files: list[str] | None = None) -> None:
+        _enable_dpi_awareness()  # before the first window, or it is too late
         self.root = TkinterDnD.Tk() if _HAS_DND else tk.Tk()
         # The real size is worked out from the built layout in _fit_window();
         # see there for why it is not a fixed number.
@@ -62,6 +88,16 @@ class App:
         self._status_key = ""
         self._status_kwargs: dict = {}
         self._closing = False
+        # What the window is busy with is kept as explicit flags, set and cleared
+        # on the UI thread. Asking a thread whether it is alive does not do: it
+        # can still be alive for a moment after posting its last callback, which
+        # would leave the buttons locked for good.
+        self._analyzing = False
+        self._running = False
+        # Paths dropped while either was going on. Drag and drop is not locked
+        # with the buttons, so they used to start a second analysis mid-run
+        # (switching Cancel off) or, during an analysis, vanish without a word.
+        self._pending: list[str] = []
 
         saved = _saved_options(i18n.load_settings())
         self.var_font = tk.BooleanVar(value=saved.font)
@@ -267,7 +303,7 @@ class App:
         return total
 
     def _update_analysis_labels(self) -> None:
-        if self.analyzer is not None and self.analyzer.is_alive():
+        if self._analyzing:  # the flag, not the thread: it can outlive its last callback
             self.lbl_summary.configure(text=t("analysis_running"))
             self.lbl_extra.configure(text="")
             return
@@ -299,45 +335,71 @@ class App:
         if folder:
             self.add_paths([folder])
 
+    @staticmethod
+    def _same_file(a: str, b: str) -> bool:
+        """Windows paths differ in case and slashes without being different files."""
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+    def _is_known(self, path: str) -> bool:
+        return any(self._same_file(path, other) for other in self.files + self._pending)
+
     def add_paths(self, paths: list[str]) -> None:
         """Analysis reads the whole book, so it runs off the UI thread. Files
-        appear in the list only once they have been read successfully."""
-        found = [p for p in unlock.collect_epubs(paths) if p not in self.files]
+        appear in the list only once they have been read successfully.
+
+        While an analysis or a run is going on the paths are held and picked up
+        afterwards; starting another analysis then would fight over the controls
+        and the file table."""
+        found = [p for p in unlock.collect_epubs(paths) if not self._is_known(p)]
         if not found:
             self.log("err_no_epub_found")
             return
-        if self.analyzer is not None and self.analyzer.is_alive():
+        if self._analyzing or self._running:
+            self._pending.extend(found)
+            self.log("log_queued", count=len(found))
             return
+        self._start_analysis(found)
+
+    def _start_analysis(self, found: list[str]) -> None:
         self.analyze_gen += 1
         gen = self.analyze_gen
-        self._set_controls(busy=True)
+        self._analyzing = True
+        self._refresh_controls()
 
         def work() -> None:
+            refused: list[tuple[str, str]] = []  # (path, message key) for one summary
             for path in found:
                 if gen != self.analyze_gen:
-                    return
+                    break
                 try:
                     analysis = unlock.analyze_epub(path)
                 except unlock.DrmProtected:
-                    self._post(self._add_failed, path, "err_drm", "log_drm")
+                    refused.append((path, "err_drm"))
+                    self._post(self.log, "log_drm", name=os.path.basename(path))
                     continue
-                except unlock.BrokenArchive:
-                    self._post(self._add_failed, path, "err_open_failed", "log_skipped")
-                    continue
-                except Exception:
-                    self._post(self._add_failed, path, "err_open_failed", "log_skipped")
+                except Exception:  # broken zip, unreadable file, out of memory ...
+                    refused.append((path, "err_open_failed"))
+                    self._post(self.log, "log_skipped", name=os.path.basename(path))
                     continue
                 self._post(self._add_done, gen, analysis)
-            self._post(self._analysis_finished, gen)
+            self._post(self._analysis_finished, refused)
 
         self.analyzer = threading.Thread(target=work, daemon=True)
         self.analyzer.start()
         self._update_analysis_labels()
 
-    def _add_failed(self, path: str, err_key: str, log_key: str) -> None:
-        name = os.path.basename(path)
-        messagebox.showerror(t("dlg_error"), t(err_key, name=name), parent=self.root)
-        self.log(log_key, name=name)
+    # A folder can hold dozens of books that cannot be read. One dialog per book
+    # meant dozens of presses of OK; the log has every name, the dialog a few.
+    MAX_REFUSED_SHOWN = 8
+
+    def _report_refused(self, refused: list[tuple[str, str]]) -> None:
+        lines = []
+        for path, key in refused[: self.MAX_REFUSED_SHOWN]:
+            name = os.path.basename(path)
+            lines.append(f"{name}: {t(key)}" if key == "err_drm" else t(key, name=name))
+        if len(refused) > self.MAX_REFUSED_SHOWN:
+            lines.append(f"... +{len(refused) - self.MAX_REFUSED_SHOWN}")
+        messagebox.showerror(t("dlg_error"), "\n".join(lines), parent=self.root)
 
     def _add_done(self, gen: int, analysis: unlock.Analysis) -> None:
         if gen != self.analyze_gen:
@@ -352,14 +414,27 @@ class App:
         for item, error in analysis.failed:
             self.log("err_css_failed", name=item, error=error)
 
-    def _analysis_finished(self, gen: int) -> None:
-        if gen != self.analyze_gen:
-            return
-        self._set_controls(busy=False)
+    def _analysis_finished(self, refused: list[tuple[str, str]]) -> None:
+        # Unconditional: even an analysis whose results were thrown away has to
+        # give the controls back, or the window stays locked.
+        self._analyzing = False
+        self._refresh_controls()
         self._update_analysis_labels()
+        if refused and not self._closing:
+            self._report_refused(refused)
+        self._drain_pending()
+
+    def _drain_pending(self) -> None:
+        """Take up what was dropped while the window was busy, once it is not."""
+        if self._pending and not (self._analyzing or self._running or self._closing):
+            paths, self._pending = self._pending, []
+            self.add_paths(paths)
 
     def clear_files(self) -> None:
+        if self._running:
+            return  # the worker is reading these; Clear is locked, and stays so
         self.analyze_gen += 1  # any analysis still running now belongs to nothing
+        self._pending.clear()
         self.files.clear()
         self.analyses.clear()
         self.lst_files.delete(0, "end")
@@ -367,8 +442,8 @@ class App:
 
     # ------------------------------------------------------------ running
     def run(self) -> None:
-        if self.worker and self.worker.is_alive():
-            return
+        if self._running or self._analyzing:
+            return  # the list is still changing, or a run is already under way
         if not self.files:
             messagebox.showinfo(t("app_title"), t("msg_no_files"), parent=self.root)
             return
@@ -380,9 +455,13 @@ class App:
         self.cancel_event.clear()
         self.outputs = []
         files = list(self.files)
-        total_items = sum(max(1, self.analyses[p].css_files + self.analyses[p].xhtml_files) for p in files)
-        self.progress.configure(maximum=total_items, value=0)
-        self._set_controls(busy=True, running=True)
+        # The worker gets its own copy. Reading self.analyses from the thread
+        # meant a Clear on the UI thread could empty it under the worker's feet.
+        weights = {p: max(1, self.analyses[p].css_files + self.analyses[p].xhtml_files)
+                   for p in files}
+        self.progress.configure(maximum=sum(weights.values()), value=0)
+        self._running = True
+        self._refresh_controls()
 
         def work() -> None:
             done = 0
@@ -410,7 +489,7 @@ class App:
                     skipped += 1
                     continue
                 finally:
-                    done = base + max(1, self.analyses[path].css_files + self.analyses[path].xhtml_files)
+                    done = base + weights[path]
                     self._post(self._set_progress, done)
                 for item, error in result.failed:
                     self._post(self.log, "err_css_failed", name=item, error=error)
@@ -439,9 +518,11 @@ class App:
         self._set_status("status_processing", file=file_index, files=files, name=name)
 
     def _finished(self, cancelled: bool, count: int, skipped: int, totals: unlock.Counts) -> None:
-        self._set_controls(busy=False, running=False)
+        self._running = False
+        self._refresh_controls()
         if cancelled or self._closing:
             self._set_status("status_cancelled")
+            self._drain_pending()
             return
         self._set_status("status_done")
         self.progress.configure(value=self.progress["maximum"])
@@ -454,16 +535,22 @@ class App:
         if skipped:
             lines.append(t("msg_skipped", count=skipped))
         messagebox.showinfo(t("app_title"), "\n".join(lines), parent=self.root)
+        self._drain_pending()
 
     def cancel(self) -> None:
         self.cancel_event.set()
         self.btn_cancel.configure(state="disabled")
 
-    def _set_controls(self, busy: bool, running: bool = False) -> None:
+    def _refresh_controls(self) -> None:
+        """Set every button from what the window is doing -- never from what the
+        last caller happened to pass, which is how Cancel got switched off in the
+        middle of a run and Clear switched back on."""
+        busy = self._analyzing or self._running
         for w in (self.btn_run, self.btn_add, self.btn_add_dir, self.btn_clear):
             w.configure(state="disabled" if busy else "normal")
         self.cmb_lang.configure(state="disabled" if busy else "readonly")
-        self.btn_cancel.configure(state="normal" if running else "disabled")
+        cancellable = self._running and not self.cancel_event.is_set()
+        self.btn_cancel.configure(state="normal" if cancellable else "disabled")
         if busy:
             self.btn_open.configure(state="disabled")
 
@@ -485,6 +572,7 @@ class App:
         self._closing = True
         self.cancel_event.set()
         self.analyze_gen += 1
+        self._pending.clear()
         try:
             self._save_options()
         except Exception:

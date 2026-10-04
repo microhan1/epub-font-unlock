@@ -43,7 +43,7 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 | 字体 | `font-family` | 内嵌字体文件和 `@font-face`（可选删除） |
 | 字号 | `font-size` 的 px、pt、cm 等绝对值 | `em`、`%`、`rem`、`larger` 等相对值 |
 | 行距 | `line-height` 的绝对值 | 无单位数字、`%`、`em` |
-| 边距（可选） | `p`、`div` 的 `margin`、`padding` 绝对值 | `0`、相对值、表格和插图的边距 |
+| 边距（可选） | `p`、`div` 的 `margin`、`padding` 绝对值 | `0`、相对值、`auto`（居中）、表格和插图的边距 |
 
 标题比正文大这个约定（相对值）在处理后依然保留。CSS 文件、XHTML 中的 `<style>` 块，以及标签上的 `style="..."` 属性都适用同一套规则。
 
