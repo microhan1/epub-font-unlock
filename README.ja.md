@@ -56,8 +56,8 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 
 ## シリーズ
 
-- しおりツール: [スキャンPDF補正](https://github.com/microhan1/scan-pdf-cleanup) · [余白カット](https://github.com/microhan1/scan-pdf-crop) · [見開き分割](https://github.com/microhan1/scan-pdf-split)
-- [しおりライブラリ](https://github.com/microhan1/chaekgalpi)
+- しおりツール: [スキャンPDF補正](https://github.com/microhan1/scan-pdf-cleanup) · [余白カット](https://github.com/microhan1/TrimPDF) · [見開き分割](https://github.com/microhan1/scan-pdf-split)
+- [しおりライブラリ（Chaekgalpi Library）](https://chaekgalpi.co.kr/?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=epubfont) — 読んだ本と読書記録を残すウェブサービス（韓国語のみ）
 
 ## ライセンス
 

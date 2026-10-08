@@ -56,8 +56,8 @@ A heading staying larger than the body text is a relative promise, and it surviv
 
 ## Series
 
-- Chaekgalpi Tools: [Scan PDF Cleanup](https://github.com/microhan1/scan-pdf-cleanup) · [Margin Crop](https://github.com/microhan1/scan-pdf-crop) · [Two-page Split](https://github.com/microhan1/scan-pdf-split)
-- [Chaekgalpi Library](https://github.com/microhan1/chaekgalpi)
+- Chaekgalpi Tools: [Scan PDF Cleanup](https://github.com/microhan1/scan-pdf-cleanup) · [Margin Crop](https://github.com/microhan1/TrimPDF) · [Two-page Split](https://github.com/microhan1/scan-pdf-split)
+- [Chaekgalpi Library](https://chaekgalpi.co.kr/?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=epubfont) — a web service for logging the books you read and writing reviews (Korean only)
 
 ## License
 
