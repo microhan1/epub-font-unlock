@@ -402,13 +402,17 @@ class App:
 
     def _update_open(self) -> None:
         """The tools page, never a download: the site serves that itself. Only a
-        page on the site is ever opened, whatever the server's answer held."""
+        page on the site is ever opened, whatever the server's answer held. A
+        window in any language but Korean opens the English page when the server
+        gave one; the language is the one showing at the moment of the click."""
         info = self._update_info
-        if info is not None and info.url.startswith(update_check.SITE):
-            try:
-                webbrowser.open(info.url)
-            except Exception:
-                pass
+        if info is not None:
+            url = update_check.page_for(info, i18n.current_lang())
+            if url.startswith(update_check.SITE):
+                try:
+                    webbrowser.open(url)
+                except Exception:
+                    pass
         self._hide_update_notice()
 
     def _update_later(self) -> None:

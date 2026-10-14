@@ -31,6 +31,18 @@ class UpdateInfo:
     latest: str
     current: str
     url: str
+    # The English tools page, when the server names one (`urlEn`) and it is a page
+    # on this site; "" otherwise. A missing or odd one never hides the notice.
+    url_en: str = ""
+
+
+def page_for(info: UpdateInfo, lang: str) -> str:
+    """Which tools page [Update] opens: the Korean one for a Korean window, the
+    English one for every other language when the server gave one, else the
+    Korean one. Whatever is chosen has already been checked to be on the site."""
+    if lang != "ko" and info.url_en.startswith(SITE):
+        return info.url_en
+    return info.url
 
 
 @dataclasses.dataclass
@@ -105,7 +117,10 @@ def interpret(data: dict | None, version: str, skipped: str = "") -> UpdateInfo 
     latest = latest.strip()
     if latest == (skipped or "").strip():
         return None
-    return UpdateInfo(latest, version, url)
+    url_en = data.get("urlEn")
+    if not isinstance(url_en, str) or not url_en.startswith(SITE):
+        url_en = ""  # absent, null, not text, or another domain: the Korean page is used
+    return UpdateInfo(latest, version, url, url_en)
 
 
 def check_async(root, slug: str, version: str, prefs, on_result: Callable[[UpdateInfo | None, bool], None], *,

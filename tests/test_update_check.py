@@ -402,6 +402,88 @@ class WhenANoticeShows(Base):
         self.assertEqual(uc.interpret(dict(OK, latest=" 0.3.0 "), CURRENT).latest, "0.3.0")
 
 
+class WhichPage(Base):
+    """[Update] opens the Korean tools page in a Korean window and the English one
+    in every other language, when the server names one. The server adds `urlEn` to
+    its answer; nothing extra is sent to get it."""
+
+    URL = OK["url"]
+    URL_EN = ("https://chaekgalpi.co.kr/en/tools/epubfont?utm_source=app&utm_medium=update"
+              "&utm_campaign=tool_update&utm_content=epubfont")
+
+    def info(self, **extra) -> uc.UpdateInfo:
+        info = uc.interpret(dict(OK, **extra), CURRENT)
+        self.assertIsNotNone(info)
+        return info
+
+    def test_korean_always_gets_the_korean_page(self) -> None:
+        self.assertEqual(uc.page_for(self.info(urlEn=self.URL_EN), "ko"), self.URL)
+        self.assertEqual(uc.page_for(self.info(), "ko"), self.URL)
+
+    def test_english_gets_the_english_page_when_there_is_one(self) -> None:
+        self.assertEqual(uc.page_for(self.info(urlEn=self.URL_EN), "en"), self.URL_EN)
+
+    def test_japanese_and_chinese_get_the_english_page_too(self) -> None:
+        for lang in ("ja", "zh-CN"):
+            with self.subTest(lang=lang):
+                self.assertEqual(uc.page_for(self.info(urlEn=self.URL_EN), lang), self.URL_EN)
+
+    def test_without_a_usable_english_page_every_language_gets_the_korean_one(self) -> None:
+        missing = dict(OK)
+        missing.pop("urlEn", None)
+        bad = [None, "", "   ", 5, [], {}, True,
+               "http://chaekgalpi.co.kr/en/tools/epubfont",            # not https
+               "https://chaekgalpi.co.kr.evil.example/en/tools/epubfont",
+               "https://evil.example/chaekgalpi.co.kr/",
+               "https://chaekgalpi.co.kr@evil.example/en",
+               "javascript:alert(1)", "file:///C:/Windows/System32/calc.exe",
+               "chaekgalpi.co.kr/en/tools/epubfont"]                    # no scheme
+        cases = [("missing key", missing)] + [(f"urlEn={v!r}", dict(OK, urlEn=v)) for v in bad]
+        for label, data in cases:
+            for lang in ("ko", "en", "ja", "zh-CN"):
+                with self.subTest(case=label, lang=lang):
+                    info = uc.interpret(data, CURRENT)
+                    self.assertIsNotNone(info, "a bad urlEn must not hide the notice")
+                    self.assertEqual(uc.page_for(info, lang), self.URL)
+
+    def test_a_bad_english_page_does_not_hide_the_notice_or_change_the_rest(self) -> None:
+        info = uc.interpret(dict(OK, urlEn="https://evil.example/"), CURRENT)
+        self.assertEqual((info.latest, info.current, info.url, info.url_en),
+                         ("0.3.0", CURRENT, self.URL, ""))
+
+    def test_the_english_page_does_not_rescue_a_korean_page_off_the_site(self) -> None:
+        """url is still required and still checked; urlEn is an addition to it."""
+        self.assertIsNone(uc.interpret(dict(OK, url="https://evil.example/", urlEn=self.URL_EN), CURRENT))
+
+    def test_whatever_page_is_chosen_is_on_the_tools_site(self) -> None:
+        for lang in ("ko", "en", "ja", "zh-CN", "fr", ""):
+            for extra in ({}, {"urlEn": self.URL_EN}, {"urlEn": "https://evil.example/"}):
+                with self.subTest(lang=lang, extra=extra):
+                    self.assertTrue(uc.page_for(self.info(**extra), lang).startswith(uc.SITE))
+
+    def test_asking_for_the_english_page_adds_nothing_to_the_request(self) -> None:
+        seen = {}
+
+        def opener(req, timeout):
+            seen["url"], seen["headers"] = req.full_url, {k.lower(): v for k, v in req.header_items()}
+            return FakeResponse(json.dumps(dict(OK, urlEn=self.URL_EN)).encode())
+
+        data = uc.fetch("epubfont", CURRENT, opener=opener)
+        self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlsplit(seen["url"]).query),
+                         {"v": [CURRENT], "os": ["win"]})
+        self.assertLessEqual(set(seen["headers"]), {"user-agent", "accept"})
+        self.assertEqual(data["urlEn"], self.URL_EN)  # it comes back; it is never asked for
+
+    def test_through_a_whole_start_the_english_page_is_carried_to_the_notice(self) -> None:
+        _, results, _ = self.run_once(uc.UpdatePrefs(), self.counting(dict(OK, urlEn=self.URL_EN))[0])
+        self.assertEqual(results, [uc.UpdateInfo("0.3.0", CURRENT, self.URL, self.URL_EN)])
+
+    def test_an_old_server_answer_with_no_urlEn_still_works_end_to_end(self) -> None:
+        _, results, _ = self.run_once(uc.UpdatePrefs(), self.counting(OK)[0])
+        self.assertEqual(results, [uc.UpdateInfo("0.3.0", CURRENT, self.URL)])
+        self.assertEqual(results[0].url_en, "")
+
+
 class Settings(unittest.TestCase):
     def test_defaults(self) -> None:
         prefs = uc.load_prefs({})

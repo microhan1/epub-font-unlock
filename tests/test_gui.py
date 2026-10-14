@@ -1012,6 +1012,95 @@ class GuiTest(unittest.TestCase):
 
         self.loop(app, check)
 
+    SITE_URL_EN = SITE_URL.replace("/tools/epubfont", "/en/tools/epubfont")
+
+    def english_info(self) -> update_check.UpdateInfo:
+        return update_check.UpdateInfo("0.3.0", update_check_version(), self.SITE_URL, self.SITE_URL_EN)
+
+    def test_update_opens_the_page_for_the_language_on_screen(self) -> None:
+        """Korean gets the Korean page; English, Japanese and Chinese get the
+        English one the server named."""
+        app = self.app()
+
+        def check() -> None:
+            wanted = {"ko": self.SITE_URL, "en": self.SITE_URL_EN,
+                      "ja": self.SITE_URL_EN, "zh-CN": self.SITE_URL_EN}
+            for index, lang in enumerate(i18n.LANGS):
+                app.cmb_lang.current(index)
+                app._on_lang()
+                self.opened.clear()
+                app._update_info = self.english_info()
+                app._show_update_notice()
+                app._update_open()
+                self.assertEqual(self.opened, [wanted[lang]], lang)
+                self.assertFalse(self.notice_shown(app), lang)
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_language_at_the_moment_of_the_click_decides(self) -> None:
+        """A notice that came up in Korean and then had the window switched to
+        English opens the English page."""
+        app = self.app()
+
+        def check() -> None:
+            app._on_update_result(self.english_info(), True)
+            app.cmb_lang.current(i18n.LANGS.index("en"))
+            app._on_lang()
+            app._update_open()
+            self.assertEqual(self.opened, [self.SITE_URL_EN])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_a_server_without_an_english_page_gives_every_language_the_korean_one(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            for index, lang in enumerate(i18n.LANGS):
+                app.cmb_lang.current(index)
+                app._on_lang()
+                self.opened.clear()
+                app._update_info = self.info()  # no url_en
+                app._show_update_notice()
+                app._update_open()
+                self.assertEqual(self.opened, [self.SITE_URL], lang)
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_an_english_page_off_the_site_is_never_opened_and_falls_back(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.cmb_lang.current(i18n.LANGS.index("en"))
+            app._on_lang()
+            # straight from a server answer, as the check delivers it
+            data = dict(self.news(), urlEn="https://evil.example/en/tools/epubfont")
+            app._on_update_result(update_check.interpret(data, update_check_version()), True)
+            app._update_open()
+            self.assertEqual(self.opened, [self.SITE_URL])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_a_forged_english_page_set_on_the_notice_itself_is_still_refused(self) -> None:
+        """Even if something put a foreign address straight into the notice, the
+        window only opens pages of the site."""
+        app = self.app()
+
+        def check() -> None:
+            app.cmb_lang.current(i18n.LANGS.index("en"))
+            app._on_lang()
+            app._update_info = update_check.UpdateInfo("9.9.9", update_check_version(),
+                                                       "https://evil.example/", "https://evil.example/en")
+            app._show_update_notice()
+            app._update_open()
+            self.assertEqual(self.opened, [])
+            self.done(app)
+
+        self.loop(app, check)
+
     def test_a_link_off_the_site_is_never_opened(self) -> None:
         app = self.app()
 
