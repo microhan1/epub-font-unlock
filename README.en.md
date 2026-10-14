@@ -64,7 +64,7 @@ If there is a newer version, a single line appears at the bottom of the window. 
 ## Series
 
 - Chaekgalpi Tools: [Scan PDF Cleanup](https://github.com/microhan1/scan-pdf-cleanup) · [Margin Crop](https://github.com/microhan1/TrimPDF) · [Two-page Split](https://github.com/microhan1/scan-pdf-split)
-- [Chaekgalpi Library](https://chaekgalpi.co.kr/tools/epubfont?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=epubfont) — a web service for logging the books you read and writing reviews (Korean only)
+- [Chaekgalpi Library](https://chaekgalpi.co.kr/en/tools/epubfont?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=epubfont) — a web service for logging the books you read and writing reviews (tools page in English; the reading-log service itself is in Korean)
 
 ## License
 
