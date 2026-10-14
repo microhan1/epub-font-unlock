@@ -12,6 +12,23 @@ import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import update_check  # noqa: E402
+
+# The window asks the chaekgalpi server about new versions 1.5 s after it opens,
+# and the suite opens hundreds of windows. None of that may reach the real
+# server, so the default connection is replaced for every test that imports this
+# module. An attempt is recorded and then fails like an offline machine would;
+# the GUI tests assert the record stays empty.
+NETWORK_ATTEMPTS: list[str] = []
+
+
+def _no_network(req, timeout=None):
+    NETWORK_ATTEMPTS.append(getattr(req, "full_url", str(req)))
+    raise OSError("the tests must not reach the network")
+
+
+update_check.fetch.__kwdefaults__["opener"] = _no_network
+
 CONTAINER = (
     '<?xml version="1.0" encoding="utf-8"?>\n'
     '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'

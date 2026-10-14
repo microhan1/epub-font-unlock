@@ -12,12 +12,15 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
 import i18n
 import unlock
+import update_check
 from i18n import t
 from unlock import Options
+from version import APP_VERSION, UPDATE_SLUG
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -106,11 +109,21 @@ class App:
         self.var_margin = tk.BooleanVar(value=saved.margin)
         self.var_remove_files = tk.BooleanVar(value=saved.remove_font_files)
         self.var_lang = tk.StringVar(value=i18n.LANG_NAMES[i18n.current_lang()])
+        # The new-version check: what is remembered, the checkbox, and the notice
+        # that is on screen (None when there is none).
+        self.update_prefs = update_check.load_prefs(i18n.load_settings())
+        self.var_update_check = tk.BooleanVar(value=self.update_prefs.update_check)
+        self._update_info: update_check.UpdateInfo | None = None
+        self._update_extra = 0  # how much taller the window got when the notice appeared
 
         self._build()
         self._apply_texts()
         self._fit_window(initial=True)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Once a day, 1.5 s after the window is up, on a background thread, silent
+        # on any failure. The window only: the command line never asks.
+        update_check.check_async(self.root, UPDATE_SLUG, APP_VERSION, self.update_prefs,
+                                 self._on_update_result)
         if initial_files:
             self.root.after(100, lambda: self.add_paths(initial_files))
 
@@ -130,12 +143,16 @@ class App:
         head.grid(row=0, column=0, sticky="ew")
         head.columnconfigure(0, weight=1)
         self._reg(ttk.Label(head, font=("", 15, "bold")), "app_title").grid(row=0, column=0, sticky="w")
-        self._reg(ttk.Label(head), "lbl_language").grid(row=0, column=1, padx=(0, 6))
+        self.chk_update = ttk.Checkbutton(head, variable=self.var_update_check,
+                                          command=self._on_update_toggle)
+        self._reg(self.chk_update, "opt_update_check")
+        self.chk_update.grid(row=0, column=1, padx=(0, 18))
+        self._reg(ttk.Label(head), "lbl_language").grid(row=0, column=2, padx=(0, 6))
         self.cmb_lang = ttk.Combobox(
             head, state="readonly", width=10, textvariable=self.var_lang,
             values=[i18n.LANG_NAMES[c] for c in i18n.LANGS],
         )
-        self.cmb_lang.grid(row=0, column=2)
+        self.cmb_lang.grid(row=0, column=3)
         self.cmb_lang.bind("<<ComboboxSelected>>", self._on_lang)
 
         # ---- files
@@ -210,9 +227,23 @@ class App:
         self.btn_run = self._reg(ttk.Button(bot, command=self.run), "btn_run")
         self.btn_run.grid(row=1, column=3, padx=(4, 0))
 
+        # ---- new-version notice: one line under everything else, never a dialog.
+        # It is built here but only gridded when there is news, so the layout above
+        # it is the same with or without it; the window just grows by this row.
+        self.frm_update = ttk.Frame(root, padding=(12, 0, 12, 10))
+        self.frm_update.columnconfigure(0, weight=1)
+        self.lbl_update = ttk.Label(self.frm_update, anchor="w")
+        self.lbl_update.grid(row=0, column=0, sticky="ew")
+        self.btn_update = ttk.Button(self.frm_update, command=self._update_open)
+        self._reg(self.btn_update, "btn_update")
+        self.btn_update.grid(row=0, column=1, padx=(8, 4))
+        self.btn_update_later = ttk.Button(self.frm_update, command=self._update_later)
+        self._reg(self.btn_update_later, "btn_update_later")
+        self.btn_update_later.grid(row=0, column=2)
+
         self._set_status("status_ready")
 
-    def _fit_window(self, initial: bool = False) -> None:
+    def _fit_window(self, initial: bool = False, shrink: int = 0) -> None:
         """Keep the window at least as big as the layout needs.
 
         Tk's grid does not shrink a row below what it asked for; it lets the
@@ -220,6 +251,9 @@ class App:
         therefore hides the Run button rather than tightening up, so the
         minimum size is taken from the built layout instead of guessed. The cap
         is for short screens, where something has to give.
+
+        `shrink` gives back height a row added earlier (the new-version notice),
+        never going below what the layout now needs.
         """
         self.root.update_idletasks()
         need_w = max(820, self.root.winfo_reqwidth())
@@ -229,7 +263,7 @@ class App:
             self.root.geometry(f"{need_w}x{need_h}")
             return
         grow_w = max(need_w, self.root.winfo_width())
-        grow_h = max(need_h, self.root.winfo_height())
+        grow_h = max(need_h, self.root.winfo_height() - shrink)
         if (grow_w, grow_h) != (self.root.winfo_width(), self.root.winfo_height()):
             self.root.geometry(f"{grow_w}x{grow_h}")
 
@@ -243,6 +277,9 @@ class App:
         self._update_analysis_labels()
         if self._status_key:
             self._set_status(self._status_key, **self._status_kwargs)
+        if self._update_info is not None:  # the notice is worded in the current language
+            self.lbl_update.configure(text=t("msg_update_available", latest=self._update_info.latest,
+                                             current=self._update_info.current))
 
     # ------------------------------------------------------------ helpers
     def _post(self, fn, *args, **kwargs) -> None:
@@ -320,6 +357,70 @@ class App:
                                           sizes=total.sizes, lines=total.lines))
         self.lbl_extra.configure(text=t("analysis_extra", margins=total.margins,
                                         inline=total.inline, font_files=total.font_files))
+
+    # ------------------------------------------------------- new version notice
+    def _save_update_prefs(self) -> None:
+        """Write the three update keys into settings.json, leaving every other key
+        (language, options) as it is."""
+        self.update_prefs.update_check = bool(self.var_update_check.get())
+        settings = i18n.load_settings()
+        update_check.store_prefs(self.update_prefs, settings)
+        i18n.save_settings(settings)
+
+    def _on_update_result(self, info: update_check.UpdateInfo | None, answered: bool) -> None:
+        """Runs on the Tk thread. The day is recorded only when the server
+        answered, so an offline start asks again next time."""
+        if self._closing:
+            return
+        if answered:
+            self.update_prefs.update_check_last = update_check.today()
+            self._save_update_prefs()
+        if info is not None and self.var_update_check.get():
+            self._update_info = info
+            self._show_update_notice()
+
+    def _show_update_notice(self) -> None:
+        info = self._update_info
+        if info is None:
+            self._hide_update_notice()
+            return
+        self.lbl_update.configure(text=t("msg_update_available", latest=info.latest,
+                                         current=info.current))
+        if self.frm_update.winfo_manager():
+            return
+        self.frm_update.grid(row=5, column=0, sticky="ew")
+        self.root.update_idletasks()
+        self._update_extra = self.frm_update.winfo_reqheight()
+        self._fit_window()  # the window grows by this row; nothing above it moves
+
+    def _hide_update_notice(self) -> None:
+        self._update_info = None
+        if self.frm_update.winfo_manager():
+            self.frm_update.grid_remove()
+            extra, self._update_extra = self._update_extra, 0
+            self._fit_window(shrink=extra)
+
+    def _update_open(self) -> None:
+        """The tools page, never a download: the site serves that itself. Only a
+        page on the site is ever opened, whatever the server's answer held."""
+        info = self._update_info
+        if info is not None and info.url.startswith(update_check.SITE):
+            try:
+                webbrowser.open(info.url)
+            except Exception:
+                pass
+        self._hide_update_notice()
+
+    def _update_later(self) -> None:
+        if self._update_info is not None:
+            self.update_prefs.update_check_skipped = self._update_info.latest  # a newer one shows again
+            self._save_update_prefs()
+        self._hide_update_notice()
+
+    def _on_update_toggle(self) -> None:
+        self._save_update_prefs()
+        if not self.var_update_check.get():
+            self._hide_update_notice()
 
     # ------------------------------------------------------------ files
     def _on_drop(self, event) -> None:

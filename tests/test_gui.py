@@ -29,6 +29,7 @@ import fixtures  # noqa: E402  (inserts the repo root on sys.path)
 
 import i18n  # noqa: E402
 import unlock  # noqa: E402
+import update_check  # noqa: E402
 
 try:
     _probe = tk.Tk()
@@ -38,6 +39,13 @@ except Exception:  # pragma: no cover - headless machine
     HAS_DISPLAY = False
 
 import gui  # noqa: E402
+from version import APP_VERSION  # noqa: E402
+
+
+def update_check_version() -> str:
+    """The version the window reports, and shows in "(현재 ...)"."""
+    return APP_VERSION
+
 
 # Frames and scrolling widgets may be smaller than they asked for; they scroll
 # or they are just containers. Everything else must fit.
@@ -68,6 +76,23 @@ class GuiTest(unittest.TestCase):
                 return _answer
 
             setattr(gui.messagebox, name, stub)
+
+        # The new-version check: no window here talks to the real server. What the
+        # "server" answers is set per test; by default it does not answer at all.
+        self.asked: list[tuple[str, str]] = []
+        self.answer: dict | None = None
+        self.opened: list[str] = []
+
+        def fake_fetch(slug, version, **kwargs):
+            self.asked.append((slug, version))
+            return self.answer
+
+        self.addCleanup(setattr, update_check, "fetch", update_check.fetch)
+        update_check.fetch = fake_fetch
+        self.addCleanup(setattr, gui.webbrowser, "open", gui.webbrowser.open)
+        gui.webbrowser.open = lambda url, *a, **k: self.opened.append(url) or True
+        fixtures.NETWORK_ATTEMPTS.clear()
+        self.addCleanup(lambda: self.assertEqual(fixtures.NETWORK_ATTEMPTS, []))
 
         i18n.init("ko")
         self.addCleanup(i18n.init, "en")
@@ -283,7 +308,9 @@ class GuiTest(unittest.TestCase):
         def check() -> None:
             app.root.update_idletasks()
             boxes = [w for w in self.widgets(app) if w.winfo_class() == "TCheckbutton"]
-            self.assertEqual(len(boxes), 5)
+            # five things to unlock, and the new-version checkbox in the header
+            self.assertEqual(len(boxes), 6)
+            self.assertIn(app.chk_update, boxes)
             for box in boxes:
                 self.assertTrue(box.winfo_ismapped(), box.cget("text"))
                 self.assertGreater(box.winfo_height(), 5, box.cget("text"))
@@ -865,6 +892,422 @@ class GuiTest(unittest.TestCase):
             self.done(app)
 
         self.loop(app, lambda: self.after_analysis(app, check))
+
+    # ------------------------------------------------------ new-version notice
+    SITE_URL = ("https://chaekgalpi.co.kr/tools/epubfont?utm_source=app&utm_medium=update"
+                "&utm_campaign=tool_update&utm_content=epubfont")
+
+    def news(self, latest: str = "0.3.0") -> dict:
+        return {"slug": "epubfont", "latest": latest, "updateAvailable": True, "url": self.SITE_URL}
+
+    def info(self, latest: str = "0.3.0") -> update_check.UpdateInfo:
+        return update_check.UpdateInfo(latest, update_check_version(), self.SITE_URL)
+
+    def notice_shown(self, app: gui.App) -> bool:
+        return bool(app.frm_update.winfo_manager())
+
+    def positions(self, app: gui.App) -> dict:
+        """Where every widget outside the notice sits, relative to the window."""
+        app.root.update()
+        left, top = app.root.winfo_rootx(), app.root.winfo_rooty()
+        notice = str(app.frm_update)
+        found = {}
+        for w in self.widgets(app):
+            name = str(w)
+            if name == "." or name.startswith(notice):
+                continue
+            found[name] = (w.winfo_rootx() - left, w.winfo_rooty() - top,
+                           w.winfo_width(), w.winfo_height())
+        return found
+
+    def test_the_check_runs_by_itself_and_shows_the_notice(self) -> None:
+        self.answer = self.news()
+        app = self.app()
+
+        def check() -> None:
+            self.assertEqual(self.asked, [("epubfont", update_check_version())])
+            self.assertTrue(self.notice_shown(app))
+            self.assertEqual(app.lbl_update.cget("text"),
+                             f"새 버전이 나왔습니다: 0.3.0 (현재 {update_check_version()})")
+            self.assertEqual(i18n.load_settings()["update_check_last"], update_check.today())
+            self.done(app)
+
+        self.loop(app, lambda: self.wait(app, lambda: self.notice_shown(app), check, "the notice"))
+
+    def test_no_notice_when_the_server_does_not_answer_and_the_day_stays_free(self) -> None:
+        self.answer = None
+        app = self.app()
+
+        def check() -> None:
+            app.root.after(300, lambda: self.guard(app, verify))
+
+        def verify() -> None:
+            self.assertFalse(self.notice_shown(app))
+            self.assertEqual(i18n.load_settings().get("update_check_last", ""), "")
+            self.done(app)
+
+        self.loop(app, lambda: self.wait(app, lambda: bool(self.asked), check, "the question"))
+
+    def test_the_server_saying_no_news_shows_nothing_but_uses_up_the_day(self) -> None:
+        self.answer = dict(self.news(), updateAvailable=False)
+        app = self.app()
+
+        def check() -> None:
+            app.root.after(300, lambda: self.guard(app, verify))
+
+        def verify() -> None:
+            self.assertFalse(self.notice_shown(app))
+            self.assertEqual(i18n.load_settings()["update_check_last"], update_check.today())
+            self.done(app)
+
+        self.loop(app, lambda: self.wait(app, lambda: bool(self.asked), check, "the question"))
+
+    def test_switched_off_nobody_is_asked(self) -> None:
+        with open(self.settings_path, "w", encoding="utf-8") as f:
+            f.write('{"update_check": false}')
+        self.answer = self.news()
+        app = self.app()
+
+        def check() -> None:
+            self.assertEqual(self.asked, [])
+            self.assertFalse(app.var_update_check.get())
+            self.assertFalse(self.notice_shown(app))
+            self.done(app)
+
+        self.loop(app, lambda: app.root.after(2300, lambda: self.guard(app, check)))
+
+    def test_asked_today_already_nobody_is_asked(self) -> None:
+        with open(self.settings_path, "w", encoding="utf-8") as f:
+            f.write('{"update_check_last": "%s"}' % update_check.today())
+        self.answer = self.news()
+        app = self.app()
+
+        def check() -> None:
+            self.assertEqual(self.asked, [])
+            self.done(app)
+
+        self.loop(app, lambda: app.root.after(2300, lambda: self.guard(app, check)))
+
+    def test_the_notice_is_not_a_dialog(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app._on_update_result(self.info(), True)
+            app.root.update()
+            self.assertTrue(self.notice_shown(app))
+            self.assertEqual(self.dialogs, [])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_update_opens_only_the_tools_page_and_clears_the_notice(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app._on_update_result(self.info(), True)
+            app._update_open()
+            self.assertEqual(self.opened, [self.SITE_URL])
+            self.assertFalse(self.notice_shown(app))
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_a_link_off_the_site_is_never_opened(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            for url in ("https://evil.example/", "http://chaekgalpi.co.kr/", "javascript:alert(1)",
+                        "https://chaekgalpi.co.kr.evil.example/"):
+                app._update_info = update_check.UpdateInfo("9.9.9", update_check_version(), url)
+                app._show_update_notice()
+                app._update_open()
+            self.assertEqual(self.opened, [])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_later_is_remembered_and_that_version_is_not_shown_again(self) -> None:
+        app = self.app()
+
+        def first() -> None:
+            app._on_update_result(self.info("0.3.0"), True)
+            app._update_later()
+            self.assertFalse(self.notice_shown(app))
+            self.assertEqual(i18n.load_settings()["update_check_skipped"], "0.3.0")
+            self.done(app)
+
+        self.loop(app, first)
+        self.destroy(app)
+
+        # a later start, a new day: the same version stays quiet
+        settings = i18n.load_settings()
+        settings["update_check_last"] = "2000-01-01"
+        i18n.save_settings(settings)
+        self.answer = self.news("0.3.0")
+        self.asked.clear()
+        again = self.app()
+
+        def second() -> None:
+            again.root.after(300, lambda: self.guard(again, verify))
+
+        def verify() -> None:
+            self.assertFalse(self.notice_shown(again))
+            self.done(again)
+
+        self.loop(again, lambda: self.wait(again, lambda: bool(self.asked), second, "the question"))
+
+    def test_later_does_not_hide_a_newer_version(self) -> None:
+        settings = {"update_check_skipped": "0.3.0", "update_check_last": "2000-01-01"}
+        with open(self.settings_path, "w", encoding="utf-8") as f:
+            import json
+            json.dump(settings, f)
+        self.answer = self.news("0.3.1")
+        app = self.app()
+
+        def check() -> None:
+            self.assertIn("0.3.1", app.lbl_update.cget("text"))
+            self.done(app)
+
+        self.loop(app, lambda: self.wait(app, lambda: self.notice_shown(app), check, "the notice"))
+
+    def test_unchecking_clears_the_notice_and_is_remembered(self) -> None:
+        app = self.app()
+
+        def first() -> None:
+            app._on_update_result(self.info(), True)
+            self.assertTrue(self.notice_shown(app))
+            app.var_update_check.set(False)
+            app._on_update_toggle()
+            self.assertFalse(self.notice_shown(app))
+            self.assertIs(i18n.load_settings()["update_check"], False)
+            self.done(app)
+
+        self.loop(app, first)
+        self.destroy(app)
+
+        self.answer = self.news()
+        self.asked.clear()
+        again = self.app()
+
+        def second() -> None:
+            self.assertFalse(again.var_update_check.get())
+            self.assertEqual(self.asked, [])
+            self.done(again)
+
+        self.loop(again, lambda: again.root.after(2300, lambda: self.guard(again, second)))
+
+    def test_a_notice_that_arrives_with_the_box_unchecked_is_not_shown(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.var_update_check.set(False)
+            app._on_update_result(self.info(), True)
+            self.assertFalse(self.notice_shown(app))
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_an_answer_after_the_window_is_closing_is_ignored(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app._closing = True
+            app._on_update_result(self.info(), True)
+            self.assertFalse(self.notice_shown(app))
+            self.assertNotIn("update_check_last", i18n.load_settings())
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_checkbox_is_on_by_default_and_worded_in_every_language(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            self.assertTrue(app.var_update_check.get())
+            expected = {"ko": "새 버전 확인", "en": "Check for updates",
+                        "ja": "新しいバージョンを確認", "zh-CN": "检查新版本"}
+            for index, lang in enumerate(i18n.LANGS):
+                app.cmb_lang.current(index)
+                app._on_lang()
+                self.assertEqual(app.chk_update.cget("text"), expected[lang])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_notice_and_its_buttons_are_worded_in_every_language(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app._on_update_result(self.info("0.3.0"), True)
+            current = update_check_version()
+            expected = {
+                "ko": (f"새 버전이 나왔습니다: 0.3.0 (현재 {current})", "업데이트", "다음에"),
+                "en": (f"Version 0.3.0 is available (current {current})", "Update", "Later"),
+                "ja": (f"新しいバージョン 0.3.0 があります（現在 {current}）", "更新", "後で"),
+                "zh-CN": (f"有新版本 0.3.0（当前 {current}）", "更新", "以后"),
+            }
+            for index, lang in enumerate(i18n.LANGS):
+                app.cmb_lang.current(index)
+                app._on_lang()  # rewords a notice that is already up
+                self.assertEqual((app.lbl_update.cget("text"), app.btn_update.cget("text"),
+                                  app.btn_update_later.cget("text")), expected[lang], lang)
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_notice_changes_nothing_above_it(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.root.update()
+            before = self.positions(app)
+            height = app.root.winfo_height()
+
+            app._on_update_result(self.info(), True)
+            app.root.update()
+            self.assertEqual(self.positions(app), before, "something moved when the notice appeared")
+            grown = app.root.winfo_height() - height
+            self.assertAlmostEqual(grown, app.frm_update.winfo_reqheight(), delta=2)
+
+            app._update_later()
+            app.root.update()
+            self.assertEqual(self.positions(app), before, "something moved when the notice went")
+            self.assertEqual(app.root.winfo_height(), height)
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_notice_never_clips_at_any_scale_language_or_size(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app._on_update_result(self.info("10.20.30"), True)
+            app.root.update()  # let the window manager finish growing the window
+            bad: list[str] = []
+            for percent, scaling in ((100, 96 / 72), (125, 120 / 72), (150, 144 / 72),
+                                     (200, 192 / 72)):
+                app.root.tk.call("tk", "scaling", scaling)
+                for index, lang in enumerate(i18n.LANGS):
+                    app.cmb_lang.current(index)
+                    app._on_lang()
+                    app.root.update()  # real events, not only idle tasks: a resize is one
+                    label = f"{percent}%/{lang}"
+                    bad += self.clipping(app, label)
+                    bottom = app.root.winfo_rooty() + app.root.winfo_height()
+                    for button in (app.btn_update, app.btn_update_later, app.btn_run):
+                        self.assertTrue(button.winfo_ismapped(), f"{label}: {button}")
+                        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), bottom,
+                                             f"{label}: {button} pushed off the window")
+                    self.assertGreaterEqual(app.root.winfo_height(), app.root.winfo_reqheight(), label)
+            self.assertEqual(bad, [])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_header_fits_the_checkbox_beside_the_language_choice(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.root.update()
+            self.assertLess(app.chk_update.winfo_rootx() + app.chk_update.winfo_width(),
+                            app.cmb_lang.winfo_rootx())
+            self.assertGreater(app.chk_update.winfo_rootx(), app.root.winfo_rootx())
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_other_settings_survive_the_update_keys(self) -> None:
+        with open(self.settings_path, "w", encoding="utf-8") as f:
+            f.write('{"lang": "ja", "options": {"font": false, "margin": true}, "extra": 7}')
+        i18n.init(None)
+        app = self.app()
+
+        def check() -> None:
+            app._on_update_result(self.info(), True)
+            app._update_later()
+            stored = i18n.load_settings()
+            self.assertEqual(stored["lang"], "ja")
+            self.assertEqual(stored["options"], {"font": False, "margin": True})
+            self.assertEqual(stored["extra"], 7)
+            self.assertEqual(stored["update_check_skipped"], "0.3.0")
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_window_opens_with_nonsense_in_the_update_settings(self) -> None:
+        with open(self.settings_path, "w", encoding="utf-8") as f:
+            f.write('{"update_check": "no", "update_check_last": 20261013, "update_check_skipped": [1]}')
+        app = self.app()
+        self.loop(app, lambda: self.done(app))
+        self.assertTrue(app.var_update_check.get())
+
+    def test_closing_the_window_while_the_request_is_out_survives_three_times(self) -> None:
+        """The crash this guards against takes down the whole process
+        (Tcl_AsyncDelete: async handler deleted by the wrong thread), so
+        surviving is the assertion. The request is held in flight, the window is
+        closed under it and every reference the test has is dropped, so if the
+        worker thread were still holding the App it would be the last owner and
+        free it off the main thread when the request finishes."""
+        import gc
+        import threading as th
+
+        started, release = th.Event(), th.Event()
+
+        def blocking(slug, version, **kwargs):
+            started.set()
+            release.wait(15)
+            return None
+
+        update_check.fetch = blocking  # setUp puts the original back afterwards
+        self.addCleanup(release.set)
+        self.addCleanup(setattr, update_check, "DELAY_MS", update_check.DELAY_MS)
+        update_check.DELAY_MS = 50
+
+        def one_round() -> None:
+            started.clear()
+            release.clear()
+            app = gui.App()
+            root = app.root
+
+            def wait(tries: int = 0) -> None:
+                if started.is_set() or tries > 300:
+                    app._on_close()  # the request is out: close the window now
+                    return
+                root.after(20, lambda: wait(tries + 1))
+
+            root.after(20, wait)
+            root.mainloop()  # returns when the window has been destroyed
+            self.assertTrue(started.is_set(), "the check never started")
+            del app, root, wait
+            gc.collect()  # the main thread lets go of what it can, as it would for real
+            release.set()  # the request now finishes with nobody left to tell
+            for thread in th.enumerate():
+                if thread.name == "update-check":
+                    thread.join(10)
+                    self.assertFalse(thread.is_alive(), "the check thread did not end")
+
+        for _ in range(3):
+            one_round()
+
+        # the Tcl interpreter is still sound afterwards
+        probe = tk.Tk()
+        probe.update()
+        probe.destroy()
+
+    def test_running_a_conversion_does_not_disturb_the_notice(self) -> None:
+        app = self.app([self.book()])
+
+        def start() -> None:
+            app._on_update_result(self.info(), True)
+            app.run()
+            self.after_run(app, check)
+
+        def check() -> None:
+            self.assertTrue(self.notice_shown(app))
+            self.assertEqual(len(app.outputs), 1)
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, start))
 
     # ------------------------------------------------------------- settings
     def test_options_survive_a_restart(self) -> None:

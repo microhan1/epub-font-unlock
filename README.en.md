@@ -2,7 +2,7 @@
 
 [한국어](README.md) · [中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-Removes hard-coded fonts, font sizes and line spacing from EPUB files so the font settings on your e-reader actually apply. Not a single character of the book's text is changed. No server, no install, the original file is never modified.
+Removes hard-coded fonts, font sizes and line spacing from EPUB files so the font settings on your e-reader actually apply. Not a single character of the book's text is changed. No server (the new-version check is the one exception, and it can be turned off), no install, the original file is never modified.
 
 > **DRM-protected EPUBs are not processed.** Most books bought from a store are. This tool neither removes nor works around DRM; it reports the file and skips it. Font **obfuscation**, which Sigil and InDesign apply when they embed a font, is not DRM, so those books are processed.
 
@@ -47,12 +47,19 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 
 A heading staying larger than the body text is a relative promise, and it survives. The same rules apply to CSS files, to `<style>` blocks inside XHTML, and to `style="..."` attributes on tags.
 
+## Checking for a new version
+
+To see whether a newer version exists, the program sends only its name and version to the chaekgalpi server (chaekgalpi.co.kr) when it starts. No file is sent, it asks at most once a day, and you can turn it off in the settings.
+
+If there is a newer version, a single line appears at the bottom of the window. Untick "Check for updates" at the top of the window to stop it asking; the command line never asks.
+
 ## What it does not do
 
 - It does not change the body text.
 - It does not open DRM-protected EPUBs. It reports them and moves on. A `META-INF/encryption.xml` is treated as not-DRM only when everything listed in it is font obfuscation; one other kind of entry, or a file that cannot be read, and the book counts as DRM and is skipped.
 - It does not convert between EPUB 2 and EPUB 3, or restructure the book.
 - It does not touch the cover, the table of contents (NCX or nav), or the metadata (OPF). The one exception: when you remove embedded font files, the OPF manifest items and the `encryption.xml` entries pointing at those files go too, because an entry for a missing file fails epubcheck.
+- It does not download or replace a new version automatically.
 
 ## Series
 
