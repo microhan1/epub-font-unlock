@@ -66,6 +66,10 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 - 书签工具：[扫描PDF清晰化](https://github.com/microhan1/scan-pdf-cleanup) · [裁边](https://github.com/microhan1/TrimPDF) · [分页](https://github.com/microhan1/scan-pdf-split)
 - [书签图书馆（Chaekgalpi Library）](https://chaekgalpi.co.kr/tools/epubfont?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=epubfont) — 记录读过的书和读书笔记的网页服务（仅韩语）
 
+## 反馈
+
+遇到问题、不方便之处或想要的功能，可以通过窗口上方的「发送反馈」或 https://chaekgalpi.co.kr/tools/epubfont#feedback 提交，无需登录。「发送反馈」只是用浏览器打开该页面，程序本身不会发送任何内容。也照常接受 GitHub [Issues](https://github.com/microhan1/epub-font-unlock/issues)。
+
 ## 许可证
 
 MIT。参见 [LICENSE](LICENSE)。

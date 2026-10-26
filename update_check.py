@@ -6,6 +6,9 @@ never blocks the UI; any failure (offline, timeout, HTTP error, bad JSON) is sil
 server decides whether the version is older (`updateAvailable`); null means "cannot
 compare" and shows nothing. Standard library only. The window only; the command line
 never asks, and nothing here downloads or replaces anything.
+
+Also the address [Send feedback] opens (feedback_url); that one is only handed to
+the browser, never requested from here.
 """
 from __future__ import annotations
 
@@ -43,6 +46,28 @@ def page_for(info: UpdateInfo, lang: str) -> str:
     if lang != "ko" and info.url_en.startswith(SITE):
         return info.url_en
     return info.url
+
+
+# Languages whose window sends "Send feedback" to the English tools page. There is no
+# Japanese or Chinese page; Korean, and anything unrecognised, gets the Korean one.
+FEEDBACK_EN_LANGS = ("en", "ja", "zh-cn")
+
+
+def feedback_url(slug: str, version: str | None, lang: str | None) -> str:
+    """The feedback box on the tools page, which [Send feedback] opens in the browser.
+
+    Put together from constants only, never from settings or a server answer. The
+    page needs `#feedback` to scroll down to the box, and `utm_source=app` to file
+    the message under the Windows program. The version is quoted whole (a "+" left
+    bare would come back as a space); an empty one leaves `v` out. Nothing is sent
+    from here: the browser asks for the page, and the user decides what to write."""
+    code = lang.strip().lower() if isinstance(lang, str) else ""
+    path = "en/tools" if code in FEEDBACK_EN_LANGS else "tools"
+    params = [("utm_source", "app"), ("utm_medium", "feedback")]
+    if isinstance(version, str) and version.strip():
+        params.append(("v", version))
+    query = "&".join(f"{key}={urllib.parse.quote(value, safe='')}" for key, value in params)
+    return f"{SITE}{path}/{urllib.parse.quote(slug, safe='')}?{query}#feedback"
 
 
 @dataclasses.dataclass

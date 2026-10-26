@@ -66,6 +66,10 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 - 책갈피 툴: [스캔 PDF 보정](https://github.com/microhan1/scan-pdf-cleanup) · [여백 자르기](https://github.com/microhan1/TrimPDF) · [두쪽 나누기](https://github.com/microhan1/scan-pdf-split)
 - [책갈피 라이브러리](https://chaekgalpi.co.kr/tools/epubfont?utm_source=github&utm_medium=referral&utm_campaign=tool_cta&utm_content=epubfont) — 읽은 책과 독서록을 기록하는 웹 서비스. 정리한 책을 다 읽으면 한 줄 남겨 보세요.
 
+## 의견 보내기
+
+안 되는 것·불편한 것·바라는 기능은 프로그램 위쪽의 「의견 보내기」 또는 https://chaekgalpi.co.kr/tools/epubfont#feedback 에서 로그인 없이 보낼 수 있습니다. 「의견 보내기」는 브라우저로 그 페이지를 열 뿐이고, 프로그램이 따로 보내는 것은 없습니다. GitHub [Issues](https://github.com/microhan1/epub-font-unlock/issues)도 그대로 받습니다.
+
 ## 라이선스
 
 MIT. [LICENSE](LICENSE) 참조.

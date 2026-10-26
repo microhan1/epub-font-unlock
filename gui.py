@@ -115,6 +115,7 @@ class App:
         self.var_update_check = tk.BooleanVar(value=self.update_prefs.update_check)
         self._update_info: update_check.UpdateInfo | None = None
         self._update_extra = 0  # how much taller the window got when the notice appeared
+        self._feedback_tip: tk.Toplevel | None = None  # the link's tooltip while hovered
 
         self._build()
         self._apply_texts()
@@ -143,16 +144,34 @@ class App:
         head.grid(row=0, column=0, sticky="ew")
         head.columnconfigure(0, weight=1)
         self._reg(ttk.Label(head, font=("", 15, "bold")), "app_title").grid(row=0, column=0, sticky="w")
+        # A link, not a form: it opens the feedback box on the tools page in the
+        # browser and sends nothing itself. There is no menu bar to put it in.
+        # Its font is the default one, underlined, made as a Tcl named font so it
+        # scales with the display like the default does. Not a tkinter Font
+        # object: that is deleted from whichever thread garbage-collects it, and
+        # Tcl aborts the process for that (see the Variable teardown in the tests).
+        root.tk.call("font", "create", "EfuLinkFont", *root.tk.splitlist(
+            root.tk.call("font", "configure", "TkDefaultFont")))
+        root.tk.call("font", "configure", "EfuLinkFont", "-underline", 1)
+        ttk.Style(root).configure("Link.TLabel", foreground="#0b57d0", font="EfuLinkFont")
+        self.lnk_feedback = ttk.Label(head, style="Link.TLabel", cursor="hand2", takefocus=True)
+        self._reg(self.lnk_feedback, "btn_feedback")
+        self.lnk_feedback.grid(row=0, column=1, padx=(0, 18))
+        self.lnk_feedback.bind("<Button-1>", lambda _e: self.open_feedback())
+        self.lnk_feedback.bind("<Return>", lambda _e: self.open_feedback())
+        self.lnk_feedback.bind("<space>", lambda _e: self.open_feedback())
+        self.lnk_feedback.bind("<Enter>", self._show_feedback_tip)
+        self.lnk_feedback.bind("<Leave>", self._hide_feedback_tip)
         self.chk_update = ttk.Checkbutton(head, variable=self.var_update_check,
                                           command=self._on_update_toggle)
         self._reg(self.chk_update, "opt_update_check")
-        self.chk_update.grid(row=0, column=1, padx=(0, 18))
-        self._reg(ttk.Label(head), "lbl_language").grid(row=0, column=2, padx=(0, 6))
+        self.chk_update.grid(row=0, column=2, padx=(0, 18))
+        self._reg(ttk.Label(head), "lbl_language").grid(row=0, column=3, padx=(0, 6))
         self.cmb_lang = ttk.Combobox(
             head, state="readonly", width=10, textvariable=self.var_lang,
             values=[i18n.LANG_NAMES[c] for c in i18n.LANGS],
         )
-        self.cmb_lang.grid(row=0, column=3)
+        self.cmb_lang.grid(row=0, column=4)
         self.cmb_lang.bind("<<ComboboxSelected>>", self._on_lang)
 
         # ---- files
@@ -425,6 +444,48 @@ class App:
         self._save_update_prefs()
         if not self.var_update_check.get():
             self._hide_update_notice()
+
+    # ------------------------------------------------------------ feedback
+    def _show_feedback_tip(self, _event=None) -> None:
+        """A tooltip under the link, while the pointer is on it. Its own little
+        window: the status line is too short for the sentence, and it would push
+        nothing around."""
+        self._hide_feedback_tip()
+        tip = tk.Toplevel(self.root)
+        tip.wm_overrideredirect(True)
+        ttk.Label(tip, text=t("tip_feedback"), padding=(6, 3), background="#ffffe1",
+                  relief="solid", borderwidth=1).pack()
+        tip.update_idletasks()
+        link = self.lnk_feedback
+        # The sentence is longer than the link, which sits near the window's right
+        # side, so the tip ends where the link ends; never off the screen's left.
+        x = max(0, min(link.winfo_rootx(), link.winfo_rootx() + link.winfo_width() - tip.winfo_reqwidth()))
+        y = link.winfo_rooty() + link.winfo_height() + 4
+        tip.wm_geometry(f"+{x}+{y}")
+        self._feedback_tip = tip
+
+    def _hide_feedback_tip(self, _event=None) -> None:
+        tip, self._feedback_tip = self._feedback_tip, None
+        if tip is not None:
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+
+    def open_feedback(self) -> None:
+        """The feedback box on the tools page, in the language showing at the
+        moment of the click. When no browser opens, the address goes into the
+        log, where it can be selected and copied, and a message says so."""
+        self._hide_feedback_tip()
+        url = update_check.feedback_url(UPDATE_SLUG, APP_VERSION, i18n.current_lang())
+        try:
+            opened = webbrowser.open(url)
+        except Exception:  # webbrowser.Error, OSError from a broken handler ...
+            opened = False
+        if not opened:
+            self.log("log_feedback_url", url=url)
+            messagebox.showwarning(t("btn_feedback"), t("msg_feedback_failed", url=url),
+                                   parent=self.root)
 
     # ------------------------------------------------------------ files
     def _on_drop(self, event) -> None:

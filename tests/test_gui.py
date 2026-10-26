@@ -68,7 +68,8 @@ class GuiTest(unittest.TestCase):
         self.addCleanup(setattr, i18n, "SETTINGS_PATH", original)
 
         self.dialogs: list[tuple[str, str]] = []
-        for name, answer in (("showinfo", None), ("showerror", None), ("askyesno", True)):
+        for name, answer in (("showinfo", None), ("showerror", None), ("showwarning", None),
+                             ("askyesno", True)):
             self.addCleanup(setattr, gui.messagebox, name, getattr(gui.messagebox, name))
 
             def stub(*args, _name=name, _answer=answer, **kwargs):
@@ -295,6 +296,9 @@ class GuiTest(unittest.TestCase):
                 for index, lang in enumerate(i18n.LANGS):
                     app.cmb_lang.current(index)
                     app._on_lang()
+                    # real events, not only idle tasks: the window widening for a
+                    # longer header is a resize, and that is one
+                    app.root.update()
                     bad += self.clipping(app, f"{size or 'default'}/{lang}")
             self.assertEqual(bad, [])
             self.done(app)
@@ -372,7 +376,7 @@ class GuiTest(unittest.TestCase):
                 for index, lang in enumerate(i18n.LANGS):
                     app.cmb_lang.current(index)
                     app._on_lang()  # relabels and refits the window
-                    app.root.update_idletasks()
+                    app.root.update()  # a resize is a real event, not an idle task
                     label = f"{percent}%/{lang}"
                     bad += self.clipping(app, label)
                     self.assertGreaterEqual(app.root.winfo_height(), app.root.winfo_reqheight(),
@@ -1397,6 +1401,347 @@ class GuiTest(unittest.TestCase):
             self.done(app)
 
         self.loop(app, lambda: self.after_analysis(app, start))
+
+    # -------------------------------------------------------- send feedback
+    FEEDBACK_KO = ("https://chaekgalpi.co.kr/tools/epubfont?utm_source=app&utm_medium=feedback"
+                   f"&v={APP_VERSION}#feedback")
+    FEEDBACK_EN = ("https://chaekgalpi.co.kr/en/tools/epubfont?utm_source=app&utm_medium=feedback"
+                   f"&v={APP_VERSION}#feedback")
+
+    def choose(self, app: gui.App, lang: str) -> None:
+        """Pick a language the way the combobox does."""
+        app.cmb_lang.current(i18n.LANGS.index(lang))
+        app._on_lang()
+
+    def no_sockets(self) -> list:
+        """Record, and refuse, any socket the test would open; asserted empty at the end."""
+        import socket
+        calls: list = []
+        saved = socket.socket.connect, socket.create_connection, socket.getaddrinfo
+
+        def record(*args, **kwargs):
+            calls.append(args[1:] if args and isinstance(args[0], socket.socket) else args)
+            raise OSError("no network in tests")
+
+        socket.socket.connect = socket.create_connection = socket.getaddrinfo = record
+
+        def restore() -> None:
+            socket.socket.connect, socket.create_connection, socket.getaddrinfo = saved
+
+        self.addCleanup(lambda: self.assertEqual(calls, [], "a socket was opened"))
+        self.addCleanup(restore)
+        return calls
+
+    def state(self, app: gui.App) -> tuple:
+        """What the window is doing, for "a failed click changed nothing"."""
+        return (list(app.files), app.lbl_status.cget("text"), str(app.btn_run["state"]),
+                str(app.cmb_lang["state"]), bool(app.var_update_check.get()),
+                self.notice_shown(app), i18n.current_lang(), app._running, app._analyzing,
+                os.path.exists(self.settings_path) and open(self.settings_path, encoding="utf-8").read())
+
+    def test_the_link_sits_in_the_header_and_reads_as_a_link(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.root.update()
+            link = app.lnk_feedback
+            self.assertTrue(link.winfo_ismapped())
+            self.assertEqual(link.winfo_parent(), app.chk_update.winfo_parent())
+            self.assertLess(link.winfo_rootx() + link.winfo_width(), app.chk_update.winfo_rootx())
+            self.assertEqual(str(link.cget("cursor")), "hand2")
+            self.assertEqual(link.winfo_class(), "TLabel")  # a link, not a text box
+            self.assertTrue(link.winfo_reqwidth() > 10)
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_one_click_opens_the_browser_once_at_the_feedback_box(self) -> None:
+        calls = self.no_sockets()
+        app = self.app()
+
+        def check() -> None:
+            app.open_feedback()
+            self.assertEqual(self.opened, [self.FEEDBACK_KO])
+            self.assertEqual(self.dialogs, [])
+            self.assertEqual(calls, [])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_mouse_and_the_keyboard_both_reach_it(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.root.update()
+            app.lnk_feedback.event_generate("<Button-1>", x=2, y=2)
+            app.root.update()
+            self.assertEqual(self.opened, [self.FEEDBACK_KO])
+            app.lnk_feedback.focus_force()
+            app.root.update()
+            app.lnk_feedback.event_generate("<Return>")
+            app.lnk_feedback.event_generate("<space>")
+            app.root.update()
+            self.assertEqual(self.opened, [self.FEEDBACK_KO] * 3)
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_each_language_opens_its_page(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            for lang in i18n.LANGS:
+                self.choose(app, lang)
+                self.opened.clear()
+                app.open_feedback()
+                want = self.FEEDBACK_KO if lang == "ko" else self.FEEDBACK_EN
+                self.assertEqual(self.opened, [want], lang)
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_switching_language_between_clicks_changes_the_next_address(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.open_feedback()
+            self.choose(app, "ja")
+            app.open_feedback()
+            self.choose(app, "zh-CN")
+            app.open_feedback()
+            self.choose(app, "ko")
+            app.open_feedback()
+            self.assertEqual(self.opened, [self.FEEDBACK_KO, self.FEEDBACK_EN,
+                                           self.FEEDBACK_EN, self.FEEDBACK_KO])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_a_browser_that_will_not_open_leaves_a_copyable_address(self) -> None:
+        """d. False, webbrowser.Error and OSError: no exception, a message with the
+        address, the address in the log, and the window as it was."""
+        import webbrowser as wb
+        self.no_sockets()
+        app = self.app([self.book()])
+        failures = {
+            "False": lambda url, *a, **k: self.opened.append(url) and False,
+            "webbrowser.Error": lambda url, *a, **k: (_ for _ in ()).throw(wb.Error("no browser")),
+            "OSError": lambda url, *a, **k: (_ for _ in ()).throw(OSError(5, "denied")),
+            "RuntimeError": lambda url, *a, **k: (_ for _ in ()).throw(RuntimeError("odd")),
+        }
+
+        def check() -> None:
+            for lang in ("ko", "en"):
+                self.choose(app, lang)
+                want = self.FEEDBACK_KO if lang == "ko" else self.FEEDBACK_EN
+                for name, opener in failures.items():
+                    before = self.state(app)
+                    self.dialogs.clear()
+                    log_before = app.txt_log.get("1.0", "end")
+                    gui.webbrowser.open = opener
+                    app.open_feedback()  # must not raise
+                    app.root.update()
+                    label = f"{lang}/{name}"
+                    self.assertEqual(self.state(app), before, label)
+                    self.assertEqual(len(self.dialogs), 1, f"{label}: {self.dialogs}")
+                    kind, text = self.dialogs[0]
+                    self.assertEqual(kind, "showwarning", label)
+                    self.assertIn(want, text, label)
+                    self.assertEqual(text, i18n.t("msg_feedback_failed", url=want))
+                    added = app.txt_log.get("1.0", "end")[len(log_before) - 1:]
+                    self.assertIn(want, added)
+                    self.assertEqual(added.strip(), i18n.t("log_feedback_url", url=want))
+            # and a browser that works again works as before
+            self.opened.clear()
+            self.dialogs.clear()
+            gui.webbrowser.open = lambda url, *a, **k: self.opened.append(url) or True
+            app.open_feedback()
+            self.assertEqual((self.opened, self.dialogs), ([self.FEEDBACK_EN], []))
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, check))
+
+    def test_the_address_in_the_log_can_be_selected_and_copied(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            gui.webbrowser.open = lambda url, *a, **k: False
+            app.open_feedback()
+            text = app.txt_log.get("1.0", "end")
+            start = text.index(self.FEEDBACK_KO)
+            app.txt_log.tag_add("sel", f"1.0+{start}c", f"1.0+{start + len(self.FEEDBACK_KO)}c")
+            self.assertEqual(app.txt_log.get("sel.first", "sel.last"), self.FEEDBACK_KO)
+            self.assertEqual(str(app.txt_log["state"]), "disabled")  # read-only, still selectable
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_link_is_worded_in_every_language_and_relabelled_on_a_switch(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            expected = {"ko": "의견 보내기", "en": "Send feedback", "ja": "ご意見を送る",
+                        "zh-CN": "发送反馈"}
+            for lang in ("ko", "en", "ja", "zh-CN", "ko"):
+                self.choose(app, lang)
+                self.assertEqual(app.lnk_feedback.cget("text"), expected[lang])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def tip_text(self, app: gui.App) -> str | None:
+        tip = app._feedback_tip
+        if tip is None:
+            return None
+        self.assertTrue(tip.winfo_exists())
+        (label,) = tip.winfo_children()
+        return label.cget("text")
+
+    def test_hovering_shows_the_tooltip_in_the_window_language_and_leaving_hides_it(self) -> None:
+        app = self.app()
+        tips = {"ko": "안 되는 것·불편한 것·바라는 기능을 알려 주세요(브라우저가 열립니다)",
+                "en": "Tell us what's broken or missing (opens your browser)",
+                "ja": "不具合・ご要望をお知らせください（ブラウザが開きます）",
+                "zh-CN": "告诉我们问题或建议（将打开浏览器）"}
+
+        def check() -> None:
+            for lang in i18n.LANGS:
+                self.choose(app, lang)
+                status = app.lbl_status.cget("text")
+                app.lnk_feedback.event_generate("<Enter>")
+                app.root.update()
+                self.assertEqual(self.tip_text(app), tips[lang])
+                tip = app._feedback_tip
+                self.assertTrue(tip.winfo_viewable(), lang)
+                # under the link, whole, and the status line is left as it was
+                link = app.lnk_feedback
+                self.assertGreater(tip.winfo_rooty(), link.winfo_rooty() + link.winfo_height() - 1)
+                self.assertGreaterEqual(tip.winfo_width(), tip.winfo_reqwidth(), lang)
+                self.assertGreaterEqual(tip.winfo_rootx(), 0, lang)
+                self.assertEqual(app.lbl_status.cget("text"), status)
+                app.lnk_feedback.event_generate("<Enter>")  # a second Enter: still one tip
+                self.assertEqual(len([w for w in app.root.winfo_children()
+                                      if isinstance(w, tk.Toplevel)]), 1)
+                app.lnk_feedback.event_generate("<Leave>")
+                self.assertIsNone(self.tip_text(app), lang)
+                self.assertFalse(tip.winfo_exists())
+            app.lnk_feedback.event_generate("<Leave>")  # leaving twice is harmless
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_clicking_takes_the_tooltip_away(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.lnk_feedback.event_generate("<Enter>")
+            self.assertIsNotNone(self.tip_text(app))
+            app.open_feedback()
+            self.assertIsNone(self.tip_text(app))
+            self.assertEqual(self.opened, [self.FEEDBACK_KO])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_closing_the_window_with_the_tooltip_up_is_clean(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.lnk_feedback.event_generate("<Enter>")
+            self.assertIsNotNone(self.tip_text(app))
+            app._on_close()  # destroys the window, tip and all
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_feedback_leaves_the_update_check_alone(self) -> None:
+        """f. The notice, the checkbox, the settings and the server calls are as they were."""
+        self.answer = self.news()
+        app = self.app()
+
+        def ready() -> bool:
+            return self.notice_shown(app)
+
+        def check() -> None:
+            asked = list(self.asked)
+            settings = open(self.settings_path, encoding="utf-8").read()
+            prefs = (app.update_prefs.update_check, app.update_prefs.update_check_last,
+                     app.update_prefs.update_check_skipped)
+            app.open_feedback()
+            gui.webbrowser.open = lambda url, *a, **k: False
+            app.open_feedback()
+            self.assertEqual(self.asked, asked)
+            self.assertTrue(self.notice_shown(app))
+            self.assertEqual(open(self.settings_path, encoding="utf-8").read(), settings)
+            self.assertEqual((app.update_prefs.update_check, app.update_prefs.update_check_last,
+                              app.update_prefs.update_check_skipped), prefs)
+            self.assertEqual(self.opened, [self.FEEDBACK_KO])
+            # [Update] still opens the tools page, not the feedback box
+            gui.webbrowser.open = lambda url, *a, **k: self.opened.append(url) or True
+            app._update_open()
+            self.assertEqual(self.opened, [self.FEEDBACK_KO, self.SITE_URL])
+            self.done(app)
+
+        self.loop(app, lambda: self.wait(app, ready, check, "the notice"))
+
+    def test_the_link_works_while_a_book_is_being_converted(self) -> None:
+        app = self.app([self.book()])
+
+        def start() -> None:
+            app.run()
+            app.open_feedback()
+            self.assertEqual(self.opened, [self.FEEDBACK_KO])
+            self.after_run(app, check)
+
+        def check() -> None:
+            self.assertEqual(len(app.outputs), 1)
+            self.assertEqual(self.opened, [self.FEEDBACK_KO])
+            self.done(app)
+
+        self.loop(app, lambda: self.after_analysis(app, start))
+
+    def test_a_whole_session_of_clicks_reaches_no_network(self) -> None:
+        """g. Every way of using the link, with sockets and urlopen watched."""
+        calls = self.no_sockets()
+        app = self.app()
+
+        def check() -> None:
+            for lang in i18n.LANGS:
+                self.choose(app, lang)
+                app.open_feedback()
+                app.lnk_feedback.event_generate("<Enter>")
+                app.lnk_feedback.event_generate("<Leave>")
+            gui.webbrowser.open = lambda url, *a, **k: False
+            app.open_feedback()
+            app.root.update()
+            self.assertEqual(calls, [])
+            self.assertEqual(fixtures.NETWORK_ATTEMPTS, [])
+            self.assertEqual(len(self.opened), 4)
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_header_with_the_link_never_clips(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            bad: list[str] = []
+            for scaling in (96 / 72, 144 / 72, 192 / 72):
+                app.root.tk.call("tk", "scaling", scaling)
+                for lang in i18n.LANGS:
+                    self.choose(app, lang)
+                    app.root.update()
+                    bad += self.clipping(app, f"{scaling:.2f}/{lang}")
+                    right = app.root.winfo_rootx() + app.root.winfo_width()
+                    for w in (app.lnk_feedback, app.chk_update, app.cmb_lang):
+                        self.assertTrue(w.winfo_ismapped(), lang)
+                        self.assertLessEqual(w.winfo_rootx() + w.winfo_width(), right, f"{lang}: {w}")
+                    self.assertLess(app.lnk_feedback.winfo_rootx() + app.lnk_feedback.winfo_width(),
+                                    app.chk_update.winfo_rootx(), lang)
+            self.assertEqual(bad, [])
+            self.done(app)
+
+        self.loop(app, check)
 
     # ------------------------------------------------------------- settings
     def test_options_survive_a_restart(self) -> None:
