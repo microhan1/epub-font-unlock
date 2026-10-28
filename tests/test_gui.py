@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import gc
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1476,10 +1477,10 @@ class GuiTest(unittest.TestCase):
             app.lnk_feedback.event_generate("<Button-1>", x=2, y=2)
             app.root.update()
             self.assertEqual(self.opened, [self.FEEDBACK_KO])
-            app.lnk_feedback.focus_force()
-            app.root.update()
-            app.lnk_feedback.event_generate("<Return>")
-            app.lnk_feedback.event_generate("<space>")
+            # through the bindings, not focus_force() and a key event: that took
+            # the keyboard away from whatever was being typed in at the time
+            self.fire(app.lnk_feedback, "<Key-Return>")
+            self.fire(app.lnk_feedback, "<Key-space>")
             app.root.update()
             self.assertEqual(self.opened, [self.FEEDBACK_KO] * 3)
             self.done(app)
@@ -1739,6 +1740,259 @@ class GuiTest(unittest.TestCase):
                     self.assertLess(app.lnk_feedback.winfo_rootx() + app.lnk_feedback.winfo_width(),
                                     app.chk_update.winfo_rootx(), lang)
             self.assertEqual(bad, [])
+            self.done(app)
+
+        self.loop(app, check)
+
+    # ------------------------------------- send feedback: keyboard and tooltip
+    @staticmethod
+    def fire(widget: tk.Misc, sequence: str) -> None:
+        """Run what Tk runs for `sequence` on `widget`: each bindtag's script in
+        turn, until one breaks. No key is pressed and the focus is not forced, so
+        the test never types into, or takes the keyboard from, another program."""
+        def field(match: re.Match) -> str:
+            return {"W": str(widget), "%": "%"}.get(match.group(1), "0")
+
+        for tag in widget.bindtags():
+            script = widget.tk.call("bind", tag, sequence)
+            if script and str(widget.tk.eval(re.sub(r"%(.)", field, script))) == "break":
+                break
+
+    @staticmethod
+    def focus_of(app: gui.App) -> str:
+        """Where Tab left the focus in this window, whether or not the window is
+        the one the desktop is typing into."""
+        return str(app.root.tk.call("focus", "-lastfor", app.root))
+
+    def test_tab_reaches_the_link_and_shift_tab_goes_back(self) -> None:
+        """a. Tab from the widget before it lands on the link, Tab again on the
+        checkbox next to it; Shift+Tab walks the same way back."""
+        calls = self.no_sockets()
+        app = self.app()
+        tk_ = app.root.tk
+
+        def check() -> None:
+            app.root.update()
+            self.assertEqual(tk_.splitlist(tk_.call("event", "info", "<<NextWindow>>")), ("<Key-Tab>",))
+            self.assertIn("<Shift-Key-Tab>", tk_.splitlist(tk_.call("event", "info", "<<PrevWindow>>")))
+            link = app.lnk_feedback
+            before = link.tk_focusPrev()
+            self.assertIsNotNone(before)
+            self.assertNotEqual(str(before), str(link))
+            self.assertEqual(str(link.tk_focusNext()), str(app.chk_update))
+            self.fire(before, "<<NextWindow>>")
+            self.assertEqual(self.focus_of(app), str(link))
+            self.fire(link, "<<NextWindow>>")
+            self.assertEqual(self.focus_of(app), str(app.chk_update))
+            self.fire(app.chk_update, "<<PrevWindow>>")
+            self.assertEqual(self.focus_of(app), str(link))
+            self.fire(link, "<<PrevWindow>>")
+            self.assertEqual(self.focus_of(app), str(before))
+            self.assertEqual(self.opened, [])  # passing through opens nothing
+            self.assertEqual(calls, [])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_enter_and_space_each_open_the_browser_exactly_once(self) -> None:
+        calls = self.no_sockets()
+        app = self.app()
+
+        def check() -> None:
+            for lang in i18n.LANGS:
+                self.choose(app, lang)
+                want = self.FEEDBACK_KO if lang == "ko" else self.FEEDBACK_EN
+                for key in ("<Key-Return>", "<Key-space>"):
+                    self.opened.clear()
+                    self.fire(app.lnk_feedback, key)
+                    app.root.update()
+                    self.assertEqual(self.opened, [want], f"{lang} {key}")
+            self.assertEqual(self.dialogs, [])
+            self.assertEqual(calls, [])
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_other_keys_do_nothing_on_the_link(self) -> None:
+        calls = self.no_sockets()
+        app = self.app()
+
+        def check() -> None:
+            link = app.lnk_feedback
+            own = set(link.tk.splitlist(link.tk.call("bind", link)))
+            self.assertEqual(own, {"<Button-1>", "<Key-Return>", "<Key-space>", "<Enter>", "<Leave>"})
+            # nothing the window class or "all" binds to a key reaches open_feedback
+            for tag in link.bindtags()[1:]:
+                for seq in link.tk.splitlist(link.tk.call("bind", tag)):
+                    self.assertNotIn("open_feedback", str(link.tk.call("bind", tag, seq)))
+            state = self.state(app)
+            for key in ("<Key-Escape>", "<Key-a>", "<Key-1>", "<Key-BackSpace>", "<Key-Delete>",
+                        "<Key-Up>", "<Key-Down>", "<Key-F1>", "<Key-KP_Enter>", "<Control-Key-c>",
+                        "<Key-Home>", "<Key-Prior>", "<Key>", "<KeyRelease-Return>",
+                        "<KeyRelease-space>", "<Double-Button-3>"):
+                self.fire(link, key)
+                app.root.update()
+                self.assertEqual(self.opened, [], key)
+            self.assertEqual(self.state(app), state)
+            self.assertIsNone(app._feedback_tip)
+            self.assertEqual((self.dialogs, calls), ([], []))
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_focus_shows_on_the_link_without_moving_anything(self) -> None:
+        """a. With the focus, the background lights up; without it, it is the
+        header's again. The link and its neighbours stay exactly where they were,
+        in every language, at 100% and at 200%."""
+        app = self.app()
+        style = gui.ttk.Style(app.root)
+
+        def geometry() -> list[tuple[int, int, int, int]]:
+            return [(w.winfo_rootx(), w.winfo_rooty(), w.winfo_width(), w.winfo_height())
+                    for w in (app.lnk_feedback, app.chk_update, app.cmb_lang)]
+
+        def background() -> str:
+            link = app.lnk_feedback
+            return str(style.lookup(link.cget("style") or "TLabel", "background", link.state()))
+
+        def check() -> None:
+            link = app.lnk_feedback
+            plain = str(style.lookup("TLabel", "background"))
+            # the focus changes a colour and nothing that takes room
+            self.assertEqual(set(style.map("Link.TLabel")), {"background"})
+            for scaling in (96 / 72, 192 / 72):
+                app.root.tk.call("tk", "scaling", scaling)
+                for lang in i18n.LANGS:
+                    self.choose(app, lang)
+                    link.event_generate("<FocusOut>")
+                    app.root.update()
+                    label = f"{scaling:.2f}/{lang}"
+                    off, size = background(), (link.winfo_reqwidth(), link.winfo_reqheight())
+                    where = geometry()
+                    self.assertNotIn("focus", link.state(), label)
+                    self.assertEqual(off, plain, label)
+                    link.event_generate("<FocusIn>")
+                    app.root.update()
+                    self.assertIn("focus", link.state(), label)
+                    self.assertEqual(background(), gui.LINK_FOCUS_BG, label)
+                    self.assertNotEqual(background(), off, label)
+                    self.assertEqual((link.winfo_reqwidth(), link.winfo_reqheight()), size, label)
+                    self.assertEqual(geometry(), where, label)
+                    # ttk measures again only when told to; tell it, focus still on
+                    link.configure(text=link.cget("text"))
+                    app.root.update()
+                    self.assertEqual((link.winfo_reqwidth(), link.winfo_reqheight()), size, label)
+                    self.assertEqual(geometry(), where, label)
+                    self.assertEqual(str(link.cget("cursor")), "hand2")
+                    link.event_generate("<FocusOut>")
+                    app.root.update()
+                    self.assertEqual(background(), off, label)
+                    self.assertEqual(geometry(), where, label)
+            self.assertEqual(self.opened, [])  # the focus alone opens nothing
+            self.done(app)
+
+        self.loop(app, check)
+
+    def place_window(self, app: gui.App, client_left: int, client_top: int) -> None:
+        """Move the window so its client area starts at this point; Windows adds a
+        frame around it, measured rather than guessed."""
+        root = app.root
+        root.update()
+        dx = root.winfo_rootx() - root.winfo_x()
+        dy = root.winfo_rooty() - root.winfo_y()
+        root.geometry(f"+{client_left - dx}+{client_top - dy}")
+        root.update()
+
+    def test_the_tooltip_stays_on_screen_at_both_edges(self) -> None:
+        """b. The window put against the left edge, against the right edge, and
+        hanging past the right edge, in the four languages at 100% and 200%: the
+        tip is wholly on the monitor, and when the window is on it, inside the
+        window's width too. (TrimPDF cut 113 px off a Japanese tip at the right.)"""
+        calls = self.no_sockets()
+        app = self.app()
+        root = app.root
+
+        def check() -> None:
+            area = gui._screen_area(root)
+            self.assertLess(area[0], area[2])
+            self.assertLess(area[1], area[3])
+            for scaling in (96 / 72, 192 / 72):
+                root.tk.call("tk", "scaling", scaling)
+                for lang in i18n.LANGS:
+                    self.choose(app, lang)
+                    root.update()
+                    width = root.winfo_width()
+                    for edge, x in (("left", area[0]), ("right", area[2] - width),
+                                    ("past right", area[2] - width + 150)):
+                        label = f"{scaling:.2f}/{lang}/{edge}"
+                        self.place_window(app, x, area[1] + 60)
+                        # past the edge the link may be on a monitor to the right
+                        # of this one; its tip then belongs on that monitor
+                        left, top, right, bottom = gui._screen_area(app.lnk_feedback)
+                        if edge != "past right":
+                            self.assertEqual((left, top, right, bottom), area, label)
+                        app.lnk_feedback.event_generate("<Enter>")
+                        root.update()
+                        tip = app._feedback_tip
+                        self.assertIsNotNone(tip, label)
+                        tx, ty, tw, th = tip.winfo_rootx(), tip.winfo_rooty(), tip.winfo_width(), tip.winfo_height()
+                        self.assertGreaterEqual(tw, tip.winfo_reqwidth(), label)
+                        self.assertGreaterEqual(tx, left, label)
+                        self.assertLessEqual(tx + tw, right, label)
+                        self.assertGreaterEqual(ty, top, label)
+                        self.assertLessEqual(ty + th, bottom, label)
+                        link = app.lnk_feedback
+                        self.assertGreater(ty, link.winfo_rooty() + link.winfo_height() - 1, label)
+                        if edge != "past right" and width <= right - left:
+                            self.assertGreaterEqual(tx, root.winfo_rootx(), label)
+                            self.assertLessEqual(tx + tw, root.winfo_rootx() + width, label)
+                        app.lnk_feedback.event_generate("<Leave>")
+                        self.assertIsNone(app._feedback_tip, label)
+            self.assertEqual((self.opened, calls), ([], []))
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_with_no_room_below_the_tooltip_goes_above_the_link(self) -> None:
+        app = self.app()
+        root = app.root
+
+        def check() -> None:
+            left, top, right, bottom = gui._screen_area(root)
+            link = app.lnk_feedback
+            root.update()
+            offset = link.winfo_rooty() - root.winfo_rooty()
+            # the link's bottom just above the taskbar: the window hangs below it
+            self.place_window(app, left + 40, bottom - offset - link.winfo_height() - 2)
+            link.event_generate("<Enter>")
+            root.update()
+            tip = app._feedback_tip
+            self.assertLess(tip.winfo_rooty() + tip.winfo_height(), link.winfo_rooty() + 1)
+            self.assertGreaterEqual(tip.winfo_rooty(), top)
+            link.event_generate("<Leave>")
+            self.done(app)
+
+        self.loop(app, check)
+
+    def test_the_screen_area_is_the_monitor_the_link_is_on(self) -> None:
+        app = self.app()
+
+        def check() -> None:
+            app.root.update()
+            link = app.lnk_feedback
+            left, top, right, bottom = gui._screen_area(link)
+            cx = link.winfo_rootx() + link.winfo_width() // 2
+            cy = link.winfo_rooty() + link.winfo_height() // 2
+            self.assertTrue(left <= cx < right and top <= cy < bottom, (left, top, right, bottom, cx, cy))
+            # without the Windows call: the main screen as Tk knows it
+            import types
+            saved = gui.sys
+            gui.sys = types.SimpleNamespace(platform="linux")
+            try:
+                self.assertEqual(gui._screen_area(link),
+                                 (0, 0, link.winfo_screenwidth(), link.winfo_screenheight()))
+            finally:
+                gui.sys = saved
             self.done(app)
 
         self.loop(app, check)

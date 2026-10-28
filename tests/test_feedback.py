@@ -52,10 +52,19 @@ class Address(unittest.TestCase):
             url = uc.feedback_url(UPDATE_SLUG, APP_VERSION, lang)
             self.assertEqual(url, (KO if lang == "ko" else EN).format(v=APP_VERSION), lang)
 
-    def test_an_unknown_or_missing_language_gets_the_korean_page(self) -> None:
-        for lang in (None, "", "   ", "fr", "zh", "zh-TW", "en-US", "klingon", 7, ["en"]):
+    def test_an_unknown_language_gets_the_english_page(self) -> None:
+        """Only Korean gets the Korean page; a code the window does not know is not
+        a reason to send someone to a page in Korean."""
+        for lang in ("fr", "zh", "zh-TW", "en-US", "klingon"):
             with self.subTest(lang=lang):
-                self.assertEqual(uc.feedback_url("epubfont", "0.2.1", lang), KO.format(v="0.2.1"))
+                self.assertEqual(uc.feedback_url("epubfont", "0.2.1", lang), EN.format(v="0.2.1"))
+
+    def test_a_missing_language_follows_the_window_s_default(self) -> None:
+        """No language at all is the window's default, English."""
+        self.assertEqual(i18n.DEFAULT_LANG, "en")
+        for lang in (None, "", "   ", 7, ["en"]):
+            with self.subTest(lang=lang):
+                self.assertEqual(uc.feedback_url("epubfont", "0.2.1", lang), EN.format(v="0.2.1"))
 
     def test_the_language_code_is_read_without_regard_to_case_or_spaces(self) -> None:
         for lang in ("EN", "En", "JA", "zh-cn", "ZH-CN", " en "):

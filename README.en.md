@@ -68,7 +68,7 @@ If there is a newer version, a single line appears at the bottom of the window. 
 
 ## Feedback
 
-Tell us what's broken, awkward or missing with **Send feedback** at the top of the window, or at https://chaekgalpi.co.kr/tools/epubfont#feedback — no sign-in needed. Send feedback only opens that page in your browser; the program itself sends nothing. GitHub [Issues](https://github.com/microhan1/epub-font-unlock/issues) are welcome as before.
+Tell us what's broken, awkward or missing with **Send feedback** at the top of the window, or on the [feedback page](https://chaekgalpi.co.kr/en/tools/epubfont#feedback) — no sign-in needed. Send feedback only opens that page in your browser; the program itself sends nothing. GitHub [Issues](https://github.com/microhan1/epub-font-unlock/issues) are welcome as before.
 
 ## License
 

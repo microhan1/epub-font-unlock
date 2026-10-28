@@ -55,6 +55,60 @@ def _enable_dpi_awareness() -> None:
             pass
 
 
+LINK_FOCUS_BG = "#d3e3fd"  # behind [Send feedback] while it has the keyboard focus
+
+
+def _screen_area(widget: tk.Misc) -> tuple[int, int, int, int]:
+    """(left, top, right, bottom) of the work area of the monitor the widget is on,
+    taskbar left out. A second monitor can sit left of or above the main one, at
+    negative coordinates, so 0 is not the screen's edge. Without the Windows call,
+    the main screen as Tk knows it."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+
+            class MonitorInfo(ctypes.Structure):
+                _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT),
+                            ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+            user32 = ctypes.windll.user32
+            user32.MonitorFromPoint.restype = wt.HANDLE
+            user32.MonitorFromPoint.argtypes = [wt.POINT, wt.DWORD]
+            user32.GetMonitorInfoW.argtypes = [wt.HANDLE, ctypes.POINTER(MonitorInfo)]
+            point = wt.POINT(widget.winfo_rootx() + widget.winfo_width() // 2,
+                             widget.winfo_rooty() + widget.winfo_height() // 2)
+            monitor = user32.MonitorFromPoint(point, 2)  # MONITOR_DEFAULTTONEAREST
+            info = MonitorInfo()
+            info.cbSize = ctypes.sizeof(MonitorInfo)
+            if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                work = info.rcWork
+                return work.left, work.top, work.right, work.bottom
+        except Exception:
+            pass
+    return 0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()
+
+
+def _tip_position(link_x: int, link_y: int, link_w: int, link_h: int, tip_w: int, tip_h: int,
+                  area: tuple[int, int, int, int],
+                  window: tuple[int, int] | None = None) -> tuple[int, int]:
+    """Where the link's tooltip goes: under the link, ending where the link ends
+    (the sentence is longer than the link, which sits near the window's right
+    side), kept within the window's (left, right) when it fits there, then pushed
+    back inside the monitor's work area: off neither side, and above the link
+    when there is no room below it. The monitor has the last word."""
+    left, top, right, bottom = area
+    x = min(link_x, link_x + link_w - tip_w)
+    if window is not None and tip_w <= window[1] - window[0]:
+        x = max(window[0], min(x, window[1] - tip_w))
+    x = max(left, min(x, right - tip_w))
+    y = link_y + link_h + 4
+    if y + tip_h > bottom:
+        y = link_y - 4 - tip_h
+    y = max(top, y)
+    return x, y
+
+
 def _saved_options(settings: dict) -> Options:
     """Options from settings.json, trusting nothing about its types. The file
     sits beside the exe where anyone can edit it; one wrong value must not stop
@@ -154,6 +208,10 @@ class App:
             root.tk.call("font", "configure", "TkDefaultFont")))
         root.tk.call("font", "configure", "EfuLinkFont", "-underline", 1)
         ttk.Style(root).configure("Link.TLabel", foreground="#0b57d0", font="EfuLinkFont")
+        # Reached with Tab, it has to show it: a label draws no focus ring, so the
+        # background lights up instead. A colour only, never padding or a border,
+        # so the header does not move when the focus comes and goes.
+        ttk.Style(root).map("Link.TLabel", background=[("focus", LINK_FOCUS_BG)])
         self.lnk_feedback = ttk.Label(head, style="Link.TLabel", cursor="hand2", takefocus=True)
         self._reg(self.lnk_feedback, "btn_feedback")
         self.lnk_feedback.grid(row=0, column=1, padx=(0, 18))
@@ -457,10 +515,10 @@ class App:
                   relief="solid", borderwidth=1).pack()
         tip.update_idletasks()
         link = self.lnk_feedback
-        # The sentence is longer than the link, which sits near the window's right
-        # side, so the tip ends where the link ends; never off the screen's left.
-        x = max(0, min(link.winfo_rootx(), link.winfo_rootx() + link.winfo_width() - tip.winfo_reqwidth()))
-        y = link.winfo_rooty() + link.winfo_height() + 4
+        x, y = _tip_position(link.winfo_rootx(), link.winfo_rooty(), link.winfo_width(),
+                             link.winfo_height(), tip.winfo_reqwidth(), tip.winfo_reqheight(),
+                             _screen_area(link),
+                             (self.root.winfo_rootx(), self.root.winfo_rootx() + self.root.winfo_width()))
         tip.wm_geometry(f"+{x}+{y}")
         self._feedback_tip = tip
 

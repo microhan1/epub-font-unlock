@@ -20,6 +20,8 @@ import urllib.parse
 import urllib.request
 from typing import Callable
 
+from i18n import DEFAULT_LANG
+
 API = "https://chaekgalpi.co.kr/api/tools/{slug}/latest"
 SITE = "https://chaekgalpi.co.kr/"  # the notice only ever opens a page on this site
 TIMEOUT = 4.0
@@ -39,18 +41,23 @@ class UpdateInfo:
     url_en: str = ""
 
 
-def page_for(info: UpdateInfo, lang: str) -> str:
+def is_korean(lang: str | None) -> bool:
+    """Whether a window language gets the Korean tools page. Both [Update] and
+    [Send feedback] ask this, so they never disagree. The first part of the code
+    decides ("ko", "KO", "ko-KR", "ko_KR"); every other code, listed or not, gets
+    the English page, as there is no Japanese or Chinese one. No language at all
+    (None, "", spaces, not text) counts as the window's default, i18n.DEFAULT_LANG."""
+    code = lang.strip() if isinstance(lang, str) else ""
+    return (code or DEFAULT_LANG).lower().replace("_", "-").split("-")[0] == "ko"
+
+
+def page_for(info: UpdateInfo, lang: str | None) -> str:
     """Which tools page [Update] opens: the Korean one for a Korean window, the
     English one for every other language when the server gave one, else the
     Korean one. Whatever is chosen has already been checked to be on the site."""
-    if lang != "ko" and info.url_en.startswith(SITE):
+    if not is_korean(lang) and info.url_en.startswith(SITE):
         return info.url_en
     return info.url
-
-
-# Languages whose window sends "Send feedback" to the English tools page. There is no
-# Japanese or Chinese page; Korean, and anything unrecognised, gets the Korean one.
-FEEDBACK_EN_LANGS = ("en", "ja", "zh-cn")
 
 
 def feedback_url(slug: str, version: str | None, lang: str | None) -> str:
@@ -61,8 +68,7 @@ def feedback_url(slug: str, version: str | None, lang: str | None) -> str:
     the message under the Windows program. The version is quoted whole (a "+" left
     bare would come back as a space); an empty one leaves `v` out. Nothing is sent
     from here: the browser asks for the page, and the user decides what to write."""
-    code = lang.strip().lower() if isinstance(lang, str) else ""
-    path = "en/tools" if code in FEEDBACK_EN_LANGS else "tools"
+    path = "tools" if is_korean(lang) else "en/tools"
     params = [("utm_source", "app"), ("utm_medium", "feedback")]
     if isinstance(version, str) and version.strip():
         params.append(("v", version))

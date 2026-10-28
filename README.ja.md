@@ -68,7 +68,7 @@ python main.py book.epub --font --size --line-height --margin --remove-font-file
 
 ## ご意見
 
-不具合・使いにくい点・ほしい機能は、ウィンドウ上部の「ご意見を送る」または https://chaekgalpi.co.kr/tools/epubfont#feedback からログインなしで送れます。「ご意見を送る」はブラウザでそのページを開くだけで、プログラムが何かを送ることはありません。GitHub の [Issues](https://github.com/microhan1/epub-font-unlock/issues) もこれまでどおり受け付けます。
+不具合・使いにくい点・ほしい機能は、ウィンドウ上部の「ご意見を送る」または[ご意見ページ](https://chaekgalpi.co.kr/en/tools/epubfont#feedback)からログインなしで送れます。「ご意見を送る」はブラウザでそのページを開くだけで、プログラムが何かを送ることはありません。GitHub の [Issues](https://github.com/microhan1/epub-font-unlock/issues) もこれまでどおり受け付けます。
 
 ## ライセンス
 
