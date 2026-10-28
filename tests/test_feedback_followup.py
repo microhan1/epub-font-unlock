@@ -234,6 +234,13 @@ class Readmes(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(links, [page + "#feedback"])
 
+    def test_each_readme_links_the_tools_page_in_its_language(self) -> None:
+        for name, page in self.FILES.items():
+            links = re.findall(r"https://chaekgalpi\.co\.kr/[^\s()\[\]<>?#]*tools/epubfont(?=\?utm_source=github)",
+                               self.read(name))
+            with self.subTest(name=name):
+                self.assertEqual(links, [page])
+
     def test_the_other_languages_link_words_not_a_bare_address(self) -> None:
         for name in ("README.en.md", "README.ja.md", "README.zh-CN.md"):
             text = self.read(name)
